@@ -1,0 +1,272 @@
+@using Microsoft.Extensions.Logging
+@inject VmDiagnosticsService Diagnostics
+@inject ILogger<VmDiagnosticsPanel> Logger
+@implements IDisposable
+
+<h6>@Title</h6>
+<p class="form-text">@Description</p>
+
+@if (!IsRunning)
+{
+    <p class="text-muted small">@T("The VM must be running to run the diagnostics.")</p>
+}
+else if (_state == "confirm")
+{
+    <div class="alert alert-warning py-2">
+        @T("A read-only script will be run on the VM")  <strong>@VmName</strong> @T("through the Azure run command (it appears in the Activity log). Continue?")
+        <div class="mt-2 d-flex gap-2">
+            <button class="btn btn-sm btn-primary" @onclick="RunAsync">@T("Confirm and run")</button>
+            <button class="btn btn-sm btn-outline-secondary" @onclick="Cancel">@T("Cancel")</button>
+        </div>
+    </div>
+}
+else if (_state == "running")
+{
+    <div class="d-flex align-items-center gap-2 mb-2">
+        <div class="spinner-border spinner-border-sm text-primary" role="status" aria-hidden="true"></div>
+        <span>@T("Diagnostics running for {0} s (usually 1-3 minutes)...", _seconds)</span>
+        <button class="btn btn-sm btn-outline-secondary" @onclick="Cancel">@T("Stop")</button>
+    </div>
+}
+else
+{
+    <button class="btn btn-sm btn-outline-primary mb-2" disabled="@Disabled" @onclick="Ask">
+        @(_report is null ? T("Run diagnostics") : T("Run diagnostics again"))
+    </button>
+}
+
+@if (!string.IsNullOrEmpty(_error))
+{
+    <div class="alert alert-danger py-2">@_error</div>
+}
+
+@if (_report is { } report)
+{
+    <p class="small text-muted mb-1">@T("Run at {0} on {1} ({2}).", report.At.ToLocalTime().ToString("HH:mm:ss"), report.VmName, report.IsWindows ? "Windows" : "Linux")</p>
+
+    <div class="alert alert-info py-2">
+        <strong>@T("Conclusions")</strong>
+        <ul class="mb-0">
+            @foreach (var line in report.Conclusions)
+            {
+                <li>@line</li>
+            }
+        </ul>
+    </div>
+
+    <div class="table-responsive">
+        <table class="table table-sm align-middle">
+            <thead><tr><th style="width: 7rem;">@T("Result")</th><th>@T("Check")</th><th>@T("Detail")</th></tr></thead>
+            <tbody>
+                @foreach (var check in report.Checks)
+                {
+                    <tr>
+                        <td><span class="badge @CheckBadge(check.Status)">@CheckLabel(check.Status)</span></td>
+                        <td>@check.Label</td>
+                        <td>@check.Text</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+
+    <details class="mb-3">
+        <summary class="small text-muted">@T("Raw script output")</summary>
+        <pre class="small bg-light p-2" style="white-space: pre-wrap;">@report.RawOutput</pre>
+    </details>
+}
+
+@if (ShowScriptLog && IsRunning)
+{
+    <hr />
+    <h6>@T("Custom script log")</h6>
+    <p class="form-text">
+        @T("Last lines of stdout, stderr and the extension log on the VM, with the date and time of the last change (Azure returns at most about 4 KB: open the VM for the whole log). Runs a read-only script (it appears in the Activity log); tokens and passwords are masked.")
+    </p>
+
+    @if (_logLoading)
+    {
+        <div class="d-flex align-items-center gap-2 mb-2">
+            <div class="spinner-border spinner-border-sm text-primary" role="status" aria-hidden="true"></div>
+            <span>@T("Reading the log (usually less than a minute)...")</span>
+        </div>
+    }
+    else
+    {
+        <button class="btn btn-sm btn-outline-primary mb-2" disabled="@(Disabled || _state == "running")" @onclick="LoadScriptLogAsync">
+            @(_scriptLog is null ? T("Show the custom script log") : T("Refresh the log"))
+        </button>
+    }
+
+    @if (!string.IsNullOrEmpty(_logError))
+    {
+        <div class="alert alert-danger py-2">@_logError</div>
+    }
+
+    @if (_scriptLog is { } log)
+    {
+        <p class="small text-muted mb-1">@T("Read at {0} on {1}.", log.At.ToLocalTime().ToString("HH:mm:ss"), log.VmName)</p>
+        @foreach (var part in log.Sections)
+        {
+            <details class="mb-2" open>
+                <summary class="small fw-semibold">@part.Title</summary>
+                <pre class="small bg-light p-2 mb-0" style="white-space: pre-wrap; max-height: 24rem; overflow: auto;">@(part.Text.Length == 0 ? T("(empty)") : part.Text)</pre>
+            </details>
+        }
+
+        @if (log.Sections.Count == 0)
+        {
+            <p class="text-muted small">@T("No readable log: see the raw output.")</p>
+            <pre class="small bg-light p-2" style="white-space: pre-wrap;">@log.RawOutput</pre>
+        }
+    }
+}
+
+@code {
+    /// <summary>Also offers the button that reads the custom-script log (stdout, stderr, handler log) from the VM.</summary>
+    [Parameter] public bool ShowScriptLog { get; set; }
+
+    private CustomScriptLog? _scriptLog;
+    private string _logError = "";
+    private bool _logLoading;
+
+    private async Task LoadScriptLogAsync()
+    {
+        var vmId = VmId;
+        _logLoading = true;
+        _logError = "";
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(4));
+            var log = await Diagnostics.GetCustomScriptLogAsync(vmId, cts.Token);
+            if (VmId == vmId) _scriptLog = log;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Reading the custom script log failed");
+            _logError = ex.Message;
+        }
+        finally
+        {
+            _logLoading = false;
+        }
+    }
+
+    /// <summary>Resource id of the VM to diagnose.</summary>
+    [Parameter, EditorRequired] public string VmId { get; set; } = "";
+    [Parameter, EditorRequired] public string VmName { get; set; } = "";
+    /// <summary>The run-command needs a running VM.</summary>
+    [Parameter] public bool IsRunning { get; set; }
+    /// <summary>Disables the start button while the host page is busy with something else.</summary>
+    [Parameter] public bool Disabled { get; set; }
+    [Parameter] public DiagnosticProfile Profile { get; set; } = DiagnosticProfile.General;
+    [Parameter] public string Title { get; set; } = T("VM diagnostics");
+    [Parameter] public string Description { get; set; } =
+        T("Checks disk space, whether the VM can reach Azure and Microsoft Entra ID, and what the last custom script reported. ") +
+        T("Runs a read-only script on the VM (1-3 minutes): it changes nothing.");
+
+    // idle -> confirm -> running -> idle (with a report or an error).
+    private string _state = "idle";
+    private DiagnosticReport? _report;
+    private string _error = "";
+    private int _seconds;
+    private bool _userCancelled;
+    private string? _shownVmId;
+    private CancellationTokenSource? _cts;
+
+    // A report belongs to one VM: choosing another VM starts from scratch.
+    protected override void OnParametersSet()
+    {
+        if (_shownVmId is not null && _shownVmId != VmId)
+        {
+            _cts?.Cancel();
+            _state = "idle";
+            _report = null;
+            _error = "";
+            _scriptLog = null;
+            _logError = "";
+        }
+
+        _shownVmId = VmId;
+    }
+
+    private void Ask() => _state = "confirm";
+
+    private void Cancel()
+    {
+        _userCancelled = true;
+        _cts?.Cancel();
+        if (_state != "running") _state = "idle";
+    }
+
+    private async Task RunAsync()
+    {
+        var vmId = VmId;
+        _cts?.Cancel();
+        _userCancelled = false;
+        _cts = new CancellationTokenSource(TimeSpan.FromMinutes(6));
+        var ct = _cts.Token;
+        _state = "running";
+        _report = null;
+        _error = "";
+        _seconds = 0;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+                while (await timer.WaitForNextTickAsync(ct))
+                {
+                    _seconds++;
+                    await InvokeAsync(StateHasChanged);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        });
+
+        try
+        {
+            var report = await Diagnostics.RunAsync(vmId, Profile, ct);
+            if (VmId == vmId) _report = report;
+        }
+        catch (OperationCanceledException ex)
+        {
+            // Only a click on "Interrompi" is an interruption; anything else (a timeout, a dropped connection) is reported as such.
+            Logger.LogWarning(ex, "Diagnostica VM: richiesta annullata (utente: {UserCancelled})", _userCancelled);
+            _error = _userCancelled
+                ? T("Diagnostics stopped (the script on the VM may still finish).")
+                : T("The request to Azure did not complete (cancelled or timed out: {0}). Try again.", ex.InnerException?.Message ?? ex.Message);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "VM diagnostics failed");
+            _error = ex.Message;
+        }
+        finally
+        {
+            _state = "idle";
+            _cts?.Cancel(); // stops the ticker
+        }
+    }
+
+    private static string CheckBadge(string status) => status switch
+    {
+        "OK" => "bg-success",
+        "WARN" => "bg-warning text-dark",
+        "FAIL" => "bg-danger",
+        _ => "bg-secondary",
+    };
+
+    private static string CheckLabel(string status) => status switch
+    {
+        "OK" => "OK",
+        "WARN" => T("Warning"),
+        "FAIL" => T("Problem"),
+        _ => T("Info"),
+    };
+
+    public void Dispose() => _cts?.Cancel();
+}

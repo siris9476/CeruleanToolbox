@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="it">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CeruleanToolbox</title>
+    <base href="/" />
+    <link rel="stylesheet" href="bootstrap/bootstrap.min.css" />
+    <link rel="stylesheet" href="app.css" />
+    <link rel="stylesheet" href="CeruleanToolbox.styles.css" />
+    <link rel="icon" type="image/png" href="favicon.png" />
+    <style>
+        /* The Blazor error bar must stay hidden until Blazor shows it. The scoped rule in MainLayout.razor.css only matches
+           the bar rendered by the layout, not this one, so without these rules the bar sat permanently below the page and
+           showed up as soon as the page scrolled a few pixels. */
+        #blazor-error-ui {
+            background: lightyellow;
+            bottom: 0;
+            box-shadow: 0 -1px 2px rgba(0, 0, 0, 0.2);
+            display: none;
+            left: 0;
+            padding: 0.6rem 1.25rem 0.7rem 1.25rem;
+            position: fixed;
+            width: 100%;
+            z-index: 1000;
+        }
+
+        #blazor-error-ui .dismiss {
+            cursor: pointer;
+            position: absolute;
+            right: 0.75rem;
+            top: 0.5rem;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="app">Caricamento...</div>
+
+    <div id="blazor-error-ui">
+        Si è verificato un errore imprevisto.
+        <a href="" class="reload">Ricarica</a>
+        <a class="dismiss">🗙</a>
+    </div>
+
+    <script src="_framework/blazor.webview.js"></script>
+</body>
+
+</html>

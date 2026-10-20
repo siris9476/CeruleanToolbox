@@ -1,0 +1,402 @@
+@page "/vm"
+@using CeruleanToolbox.Services
+@inject ResourceInventoryService Inventory
+@inject VmOperationsService VmOps
+@inject ActivityLogService ActivityOps
+@using Microsoft.Extensions.Logging
+@inject ConnectionManagerService Connections
+@inherits CeruleanToolboxPageBase
+
+<PageTitle>Virtual Machine</PageTitle>
+
+<h1>Virtual Machine</h1>
+
+@if (SelectedVm is null)
+{
+    <p>
+        @T("Lists the virtual machines. Click a VM name, or double-click its row, to open its overview.")
+    </p>
+
+    <div class="row mb-3">
+        <div class="col-md-6">
+            <label class="form-label">@T("Subscription (optional)")</label>
+            <SearchableSelect TItem="SubscriptionInfo" Items="Subscriptions"
+                               GetLabel="@(s => $"{s.DisplayName} ({s.SubscriptionId})")" GetValue="@(s => s.SubscriptionId)"
+                               SelectedValue="SelectedSubscriptionId" SelectedValueChanged="OnSubscriptionChangedAsync"
+                               Placeholder='@T("-- all --")' Disabled="@(IsLoading || IsBusy)" />
+        </div>
+        <div class="col-md-4">
+            <label class="form-label">@T("Filter by name")</label>
+            <input class="form-control" placeholder='@T("filter...")' @bind="NameFilter" @bind:event="oninput" />
+        </div>
+    </div>
+}
+
+@if (!string.IsNullOrEmpty(StatusMessage))
+{
+    <div class="alert @(IsError ? "alert-danger" : "alert-info")">@StatusMessage</div>
+}
+
+@if (SelectedVm is null)
+{
+    @if (string.IsNullOrEmpty(SelectedSubscriptionId) && !HasLoadedAllSubscriptions && !IsLoading)
+    {
+        <div class="alert alert-secondary">
+            @T("No subscription selected: pick one for a quick view, or")
+            <button class="btn btn-sm btn-outline-primary" @onclick="LoadAllSubscriptionsAsync">@T("Load all subscriptions")</button>
+            @T("— it may take a while if you have many.")
+        </div>
+    }
+
+    @if (IsLoading)
+    {
+        <div class="d-flex align-items-center gap-2 mb-3">
+            <div class="spinner-border spinner-border-sm text-primary" role="status" aria-hidden="true"></div>
+            <span>@T("Loading...")</span>
+        </div>
+    }
+
+    @if (!IsLoading && (!string.IsNullOrEmpty(SelectedSubscriptionId) || HasLoadedAllSubscriptions))
+    {
+        @if (!FilteredVms.Any())
+        {
+            <p><em>@T("No VMs found.")</em></p>
+        }
+        else
+        {
+            <table class="table table-sm table-hover align-middle">
+                <thead>
+                    <tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>Location</th><th>@T("Status")</th><th>@T("Actions")</th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var vm in FilteredVms)
+                    {
+                        <tr style="cursor: pointer;" title='@T("Double-click to open the VM")' @ondblclick="() => OpenVmAsync(vm)">
+                            <td>
+                                <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenVmAsync(vm)">
+                                    @vm.Name <span aria-hidden="true">&rsaquo;</span>
+                                </button>
+                            </td>
+                            <td>@GetSubscriptionName(vm.Id)</td>
+                            <td>@vm.ResourceGroup</td>
+                            <td>@vm.Location</td>
+                            <td>@vm.PowerState</td>
+                            <td @ondblclick:stopPropagation="true">
+                                <button class="btn btn-sm btn-success" disabled="@IsBusy" @onclick="() => StartAsync(vm)">Start</button>
+                                <button class="btn btn-sm btn-warning" disabled="@IsBusy" @onclick="() => StopAsync(vm)">Stop</button>
+                                <button class="btn btn-sm btn-secondary" disabled="@IsBusy" @onclick="() => RestartAsync(vm)">Restart</button>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+    }
+}
+else
+{
+    <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
+        <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" @onclick="CloseVm">&larr; Virtual Machine</button>
+        <h4 class="mb-0">@SelectedVm.Name</h4>
+        @if (Overview is not null)
+        {
+            <span class="badge bg-secondary">@Overview.Status</span>
+        }
+        <div class="ms-auto d-flex gap-1">
+            <button class="btn btn-sm btn-success" disabled="@IsBusy" @onclick="() => StartAsync(SelectedVm)">Start</button>
+            <button class="btn btn-sm btn-warning" disabled="@IsBusy" @onclick="() => StopAsync(SelectedVm)">Stop</button>
+            <button class="btn btn-sm btn-secondary" disabled="@IsBusy" @onclick="() => RestartAsync(SelectedVm)">Restart</button>
+            <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" @onclick="RefreshVmAsync">@T("Refresh")</button>
+        </div>
+    </div>
+    <p class="text-muted small">
+        @GetSubscriptionName(SelectedVm.Id) · Resource group @SelectedVm.ResourceGroup · @SelectedVm.Location
+    </p>
+
+    @if (Overview is not null)
+    {
+        <ResourceOverviewView Overview="Overview" />
+
+        <hr />
+        <VmDiagnosticsPanel VmId="@SelectedVm.Id" VmName="@SelectedVm.Name" IsRunning="IsRunningVm" Disabled="IsBusy" Profile="DiagnosticProfile.General" />
+
+        <hr />
+        <h6>@T("Resize")</h6>
+        <div class="row align-items-end">
+            <div class="col-md-4">
+                <SearchableSelect TItem="string" Items="AvailableSizes" GetLabel="@(s => s)" GetValue="@(s => s)"
+                                   SelectedValue="SelectedNewSize" SelectedValueChanged="@(v => SelectedNewSize = v)"
+                                   Placeholder='@T("-- new size --")' />
+            </div>
+            <div class="col-md-5">
+                @if (!string.IsNullOrEmpty(SelectedNewSize))
+                {
+                    <ConfirmDeleteButton ConfirmText="@SelectedVm.Name" ButtonLabel='@T("Apply resize")'
+                                         ConfirmLabel='@T("Confirm resize")' IsBusy="IsBusy"
+                                         OnConfirmed="ResizeAsync" />
+                }
+            </div>
+        </div>
+        <p class="form-text">@T("Resizing requires the VM to be stopped for many size combinations; if it fails, try stopping it first.")</p>
+    }
+}
+
+@code {
+    private List<VmInfo> Vms { get; set; } = new();
+    private string SelectedSubscriptionId { get; set; } = "";
+    private string NameFilter { get; set; } = "";
+
+    private VmInfo? SelectedVm { get; set; }
+    private ResourceOverview? Overview { get; set; }
+    private List<string> AvailableSizes { get; set; } = new();
+    private string SelectedNewSize { get; set; } = "";
+
+    private bool IsRunningVm => Overview?.Status.Contains("running", StringComparison.OrdinalIgnoreCase) == true;
+
+    private IEnumerable<VmInfo> FilteredVms => Vms.Where(v =>
+        string.IsNullOrWhiteSpace(NameFilter) || v.Name.Contains(NameFilter, StringComparison.OrdinalIgnoreCase));
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            Subscriptions = await Inventory.ListSubscriptionsAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+
+        await AutoOpenAsync();
+    }
+
+    private async Task AutoOpenAsync()
+    {
+        var id = RequestedResourceId;
+        if (id is null || Subscriptions.Count == 0) return;
+
+        await OnSubscriptionChangedAsync(RequestedSubscriptionId ?? "");
+        var item = Vms.FirstOrDefault(x => string.Equals(x.Id, id, StringComparison.OrdinalIgnoreCase));
+        if (item is not null)
+        {
+            await OpenVmAsync(item);
+        }
+    }
+
+    private async Task OnSubscriptionChangedAsync(string subscriptionId)
+    {
+        SelectedSubscriptionId = subscriptionId;
+        Vms = new();
+        HasLoadedAllSubscriptions = false;
+
+        // Clearing back to "all" doesn't auto-load: fetching every subscription is expensive,
+        // so it waits for the explicit button instead of firing on every selection change.
+        if (string.IsNullOrEmpty(SelectedSubscriptionId)) return;
+
+        await LoadAsync(new[] { SelectedSubscriptionId });
+    }
+
+    private async Task LoadAllSubscriptionsAsync()
+    {
+        HasLoadedAllSubscriptions = true;
+        await LoadAsync(Subscriptions.Select(s => s.SubscriptionId).ToList());
+    }
+
+    private async Task LoadAsync(IEnumerable<string> subscriptionIds)
+    {
+        IsLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            var vms = new List<VmInfo>();
+            foreach (var id in subscriptionIds)
+            {
+                vms.AddRange(await VmOps.ListAllVirtualMachinesAsync(id));
+            }
+
+            Vms = vms;
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private async Task OpenVmAsync(VmInfo vm)
+    {
+        if (IsBusy) return;
+
+        IsBusy = true;
+        SetStatus(T("Opening {0}...", vm.Name), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await LoadVmDetailAsync(vm);
+            SelectedVm = vm;
+            SetStatus("", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task LoadVmDetailAsync(VmInfo vm)
+    {
+        Overview = await VmOps.GetOverviewAsync(vm.Id);
+        SelectedNewSize = "";
+
+        // Sizes are only needed for the resize card; a failure there must not block the overview.
+        try
+        {
+            AvailableSizes = await VmOps.ListAvailableSizesAsync(vm.Id);
+        }
+        catch (Exception)
+        {
+            AvailableSizes = new();
+        }
+
+        // The Activity Log reads take a few seconds: the overview opens first and the events table is added when ready.
+        _ = AddEventsAsync(vm, Overview);
+    }
+
+    // Changes and power/lifecycle actions of a VM; read-only or remote-execution actions (runCommand, listKeys...) are left out.
+    private static bool IsLifecycle(string operation)
+    {
+        var op = operation.ToLowerInvariant();
+        return op.EndsWith("/write") || op.EndsWith("/delete") ||
+               new[] { "/start/action", "/poweroff/action", "/deallocate/action", "/restart/action", "/redeploy/action",
+                       "/reimage/action", "/attachdetachdatadisks/action" }.Any(op.EndsWith);
+    }
+
+    // Appends a "recent events" table (from the Activity Log) to the overview of the VM that is still open.
+    private async Task AddEventsAsync(VmInfo vm, ResourceOverview overview)
+    {
+        const int days = 14;
+        try
+        {
+            var subscriptionId = vm.Id.Split('/', StringSplitOptions.RemoveEmptyEntries)[1];
+            var events = await ActivityOps.LoadForResourceAsync(subscriptionId, vm.Id, days, CancellationToken.None);
+
+            var apps = Connections.GetAll().ToDictionary(c => c.ClientId, c => c.Name, StringComparer.OrdinalIgnoreCase);
+            var rows = events
+                .Where(e => e.Status is "Succeeded" or "Failed" && !ActivityLogService.IsNoise(e) && (e.Status == "Failed" || IsLifecycle(e.Operation)))
+                .OrderByDescending(e => e.When)
+                .Take(15)
+                .Select(e => (IReadOnlyList<string>)new[]
+                {
+                    e.When.ToLocalTime().ToString("dd/MM HH:mm:ss"),
+                    ActivityLogService.ShortOperation(e.Operation),
+                    e.Status == "Failed" ? T("Failed") : T("Succeeded"),
+                    e.AppId.Length > 0 && apps.TryGetValue(e.AppId, out var name) ? $"{name} (service principal)" : e.Caller,
+                    e.ClientIp.Length > 0 ? e.ClientIp : "-",
+                    e.Message.Length > 0 ? e.Message : "-",
+                })
+                .ToList();
+            if (rows.Count == 0) rows.Add(new[] { T("No events in the last {0} days", days), "", "", "", "", "" });
+
+            // Only if the user is still looking at the same overview (it may have been refreshed or closed meanwhile).
+            if (SelectedVm?.Id == vm.Id && ReferenceEquals(Overview, overview))
+            {
+                Overview = overview with
+                {
+                    Tables = overview.Tables.Append(new InfoTable(
+                        T("Latest change and start/stop events (last {0} days; remote scripts are in the Activity log)", days),
+                        new[] { T("When"), T("Operation"), T("Outcome"), T("Who"), "IP", T("Detail") }, rows)).ToList(),
+                };
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (Exception)
+        {
+            // The events are an extra: if the Activity Log cannot be read the overview stays as it is.
+        }
+    }
+
+    private void CloseVm()
+    {
+        SelectedVm = null;
+        Overview = null;
+        SetStatus("", error: false);
+    }
+
+    private async Task RefreshVmAsync()
+    {
+        if (IsBusy || SelectedVm is null) return;
+
+        IsBusy = true;
+        StateHasChanged();
+
+        try
+        {
+            await LoadVmDetailAsync(SelectedVm);
+            SetStatus("", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private Task StartAsync(VmInfo vm) => RunActionAsync(vm, VmOps.StartAsync, name => T("Starting {0}...", name));
+    private Task StopAsync(VmInfo vm) => RunActionAsync(vm, VmOps.StopAsync, name => T("Stopping {0}...", name));
+    private Task RestartAsync(VmInfo vm) => RunActionAsync(vm, VmOps.RestartAsync, name => T("Restarting {0}...", name));
+
+    private Task ResizeAsync()
+    {
+        var vm = SelectedVm;
+        var size = SelectedNewSize;
+        if (vm is null || string.IsNullOrEmpty(size)) return Task.CompletedTask;
+
+        return RunActionAsync(vm, (id, ct) => VmOps.ResizeAsync(id, size, ct), name => T("Resizing {0} to {1}...", name, size));
+    }
+
+    private async Task RunActionAsync(VmInfo vm, Func<string, CancellationToken, Task> action, Func<string, string> status)
+    {
+        if (IsBusy) return;
+
+        IsBusy = true;
+        SetStatus(status(vm.Name), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await action(vm.Id, CancellationToken.None);
+
+            if (SelectedVm is not null)
+            {
+                await LoadVmDetailAsync(SelectedVm);
+            }
+            else
+            {
+                await LoadAsync(string.IsNullOrEmpty(SelectedSubscriptionId)
+                    ? Subscriptions.Select(s => s.SubscriptionId).ToList()
+                    : new[] { SelectedSubscriptionId });
+            }
+
+            SetStatus(T("Operation completed."), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+}

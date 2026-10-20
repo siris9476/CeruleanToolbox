@@ -1,0 +1,549 @@
+@page "/computeextras"
+@using CeruleanToolbox.Services
+@inject ResourceInventoryService Inventory
+@inject ComputeExtrasService ComputeExtrasOps
+@inherits CeruleanToolboxPageBase
+
+<PageTitle>Compute Extra</PageTitle>
+
+<h1>Compute Extra</h1>
+<p>
+    @T("View of compute/hosting resources that complement VMs: Virtual Machine Scale Sets, Managed Disks (unattached ones are highlighted and can be deleted), Snapshots (can be created from a disk and deleted), App Service plans (the hosting plan behind the App Services already managed in Resources) and DevTest Lab schedules (automatic shutdown).")
+</p>
+
+<div class="row mb-3">
+    <div class="col-md-6">
+        <label class="form-label">@T("Subscription (optional)")</label>
+        <SearchableSelect TItem="SubscriptionInfo" Items="Subscriptions"
+                           GetLabel="@(s => $"{s.DisplayName} ({s.SubscriptionId})")" GetValue="@(s => s.SubscriptionId)"
+                           SelectedValue="SelectedSubscriptionId" SelectedValueChanged="OnSubscriptionChangedAsync"
+                           Placeholder='@T("-- all --")' Disabled="@IsLoading" />
+    </div>
+</div>
+
+@if (!string.IsNullOrEmpty(StatusMessage))
+{
+    <div class="alert @(IsError ? "alert-danger" : "alert-info")">@StatusMessage</div>
+}
+
+@if (string.IsNullOrEmpty(SelectedSubscriptionId) && !HasLoadedAllSubscriptions)
+{
+    <div class="alert alert-secondary">
+        @T("No subscription selected: pick one, or")
+        <button class="btn btn-sm btn-outline-primary" @onclick="() => OnSubscriptionChangedAsync(SelectedSubscriptionId)">@T("Load all subscriptions")</button>
+        @T("— this can take a while if you have many.")
+    </div>
+}
+else
+{
+    <ul class="nav nav-tabs mb-3">
+        @foreach (var tab in Tabs)
+        {
+            <li class="nav-item">
+                <button class="nav-link @(ActiveTab == tab ? "active" : "")" @onclick="() => SelectTabAsync(tab)">@tab</button>
+            </li>
+        }
+    </ul>
+
+    @if (IsLoading)
+    {
+        <div class="d-flex align-items-center gap-2 mb-3">
+            <div class="spinner-border spinner-border-sm text-primary" role="status" aria-hidden="true"></div>
+            <span>@T("Loading...")</span>
+        </div>
+    }
+    else
+    {
+        @if (DetailId is not null)
+        {
+            <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
+                <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" @onclick="CloseDetail">&larr; @ActiveTab</button>
+                <h4 class="mb-0">@DetailName</h4>
+                @if (DetailOverview is not null)
+                {
+                    <span class="badge bg-secondary">@DetailOverview.Status</span>
+                }
+                <button class="btn btn-sm btn-outline-secondary ms-auto" disabled="@IsBusy" @onclick="RefreshDetailAsync">@T("Refresh")</button>
+            </div>
+            <p class="text-muted small">@GetSubscriptionName(DetailId) · Resource group @ResourceGroupOf(DetailId)</p>
+
+            @if (DetailOverview is not null)
+            {
+                <ResourceOverviewView Overview="DetailOverview" />
+            }
+        }
+        else if (ActiveTab == "VM Scale Set")
+        {
+            @if (Vmss.Count == 0)
+            {
+                <p><em>@T("No VM Scale Sets found.")</em></p>
+            }
+            else
+            {
+                <table class="table table-sm">
+                    <thead><tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>Location</th><th>@T("Capacity")</th><th>@T("Mode")</th></tr></thead>
+                    <tbody>
+                        @foreach (var v in Vmss)
+                        {
+                            <tr @ondblclick="() => OpenDetailAsync(v.Id, v.Name)" style="cursor: pointer;" title='@T("Double-click to open the VM Scale Set")'>
+                                <td>
+                                    <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenDetailAsync(v.Id, v.Name)">
+                                        @v.Name <span aria-hidden="true">&rsaquo;</span>
+                                    </button>
+                                </td>
+                                <td>@GetSubscriptionName(v.Id)</td>
+                                <td>@v.ResourceGroup</td>
+                                <td>@v.Location</td>
+                                <td>@v.Capacity</td>
+                                <td>@(v.OrchestrationMode ?? "-")</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        }
+        else if (ActiveTab == "Managed Disk")
+        {
+            @if (Disks.Count == 0)
+            {
+                <p><em>@T("No managed disks found.")</em></p>
+            }
+            else
+            {
+                <table class="table table-sm">
+                    <thead><tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>Location</th><th>@T("Size (GB)")</th><th>SKU</th><th>@T("Status")</th><th>@T("Attached")</th><th></th></tr></thead>
+                    <tbody>
+                        @foreach (var d in Disks)
+                        {
+                            <tr class="@(d.IsAttached ? "" : "table-warning")" @key="d.Id" @ondblclick="() => OpenDetailAsync(d.Id, d.Name)" style="cursor: pointer;" title='@T("Double-click to open the disk")'>
+                                <td>
+                                    <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenDetailAsync(d.Id, d.Name)">
+                                        @d.Name <span aria-hidden="true">&rsaquo;</span>
+                                    </button>
+                                </td>
+                                <td>@GetSubscriptionName(d.Id)</td>
+                                <td>@d.ResourceGroup</td>
+                                <td>@d.Location</td>
+                                <td>@(d.SizeGb?.ToString() ?? "-")</td>
+                                <td>@d.Sku</td>
+                                <td>@(d.DiskState ?? "-")</td>
+                                <td>@(d.IsAttached ? T("Yes") : T("No — candidate for cleanup"))</td>
+                                <td @ondblclick:stopPropagation="true">
+                                    @if (!d.IsAttached)
+                                    {
+                                        <ConfirmDeleteButton ConfirmText="@d.Name" IsBusy="IsRowBusy" OnConfirmed="() => DeleteDiskAsync(d.Id)" />
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+
+            <h4 class="mt-3">@T("Create snapshot")</h4>
+            @if (!string.IsNullOrEmpty(SnapshotFormMessage))
+            {
+                <div class="alert alert-danger">@SnapshotFormMessage</div>
+            }
+            <div class="row g-2 align-items-end mb-3">
+                <div class="col-md-5">
+                    <label class="form-label">@T("Source disk")</label>
+                    <SearchableSelect TItem="ManagedDiskInfo" Items="Disks"
+                                       GetLabel="@(d => $"{d.Name} ({d.ResourceGroup})")" GetValue="@(d => d.Id)"
+                                       SelectedValue="SnapshotSourceDiskId" SelectedValueChanged="@(v => SnapshotSourceDiskId = v)" />
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label">@T("Snapshot name")</label>
+                    <input class="form-control" @bind="NewSnapshotName" />
+                </div>
+                <div class="col-md-3">
+                    <button class="btn btn-primary" disabled="@(string.IsNullOrEmpty(SnapshotSourceDiskId) || string.IsNullOrWhiteSpace(NewSnapshotName) || IsRowBusy)" @onclick="CreateSnapshotAsync">
+                        @(IsRowBusy ? T("Creating...") : T("Create snapshot"))
+                    </button>
+                </div>
+            </div>
+        }
+        else if (ActiveTab == "Snapshot")
+        {
+            @if (Snapshots.Count == 0)
+            {
+                <p><em>@T("No snapshots found.")</em></p>
+            }
+            else
+            {
+                <table class="table table-sm">
+                    <thead><tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>Location</th><th>@T("Size (GB)")</th><th>@T("Created on")</th><th></th></tr></thead>
+                    <tbody>
+                        @foreach (var s in Snapshots)
+                        {
+                            <tr @key="s.Id" @ondblclick="() => OpenDetailAsync(s.Id, s.Name)" style="cursor: pointer;" title='@T("Double-click to open the snapshot")'>
+                                <td>
+                                    <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenDetailAsync(s.Id, s.Name)">
+                                        @s.Name <span aria-hidden="true">&rsaquo;</span>
+                                    </button>
+                                </td>
+                                <td>@GetSubscriptionName(s.Id)</td>
+                                <td>@s.ResourceGroup</td>
+                                <td>@s.Location</td>
+                                <td>@(s.SizeGb?.ToString() ?? "-")</td>
+                                <td>@(s.CreatedOn?.LocalDateTime.ToString("g") ?? "-")</td>
+                                <td @ondblclick:stopPropagation="true">
+                                    <ConfirmDeleteButton ConfirmText="@s.Name" IsBusy="IsRowBusy" OnConfirmed="() => DeleteSnapshotAsync(s.Id)" />
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        }
+        else if (ActiveTab == "App Service Plan")
+        {
+            @if (AppServicePlans.Count == 0)
+            {
+                <p><em>@T("No App Service plans found.")</em></p>
+            }
+            else
+            {
+                <table class="table table-sm">
+                    <thead><tr><th>Nome</th><th>Subscription</th><th>Resource Group</th><th>Location</th><th>SKU</th><th>@T("# Hosted sites")</th><th># Worker</th></tr></thead>
+                    <tbody>
+                        @foreach (var p in AppServicePlans)
+                        {
+                            <tr @ondblclick="() => OpenDetailAsync(p.Id, p.Name)" style="cursor: pointer;" title='@T("Double-click to open the plan")'>
+                                <td>
+                                    <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenDetailAsync(p.Id, p.Name)">
+                                        @p.Name <span aria-hidden="true">&rsaquo;</span>
+                                    </button>
+                                </td>
+                                <td>@GetSubscriptionName(p.Id)</td>
+                                <td>@p.ResourceGroup</td>
+                                <td>@p.Location</td>
+                                <td>@p.Sku</td>
+                                <td>@p.NumberOfSites</td>
+                                <td>@(p.NumberOfWorkers?.ToString() ?? "-")</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        }
+        else if (ActiveTab == "DevTest Lab Schedule")
+        {
+            @if (Schedules.Count == 0)
+            {
+                <p><em>@T("No schedules found.")</em></p>
+            }
+            else
+            {
+                <table class="table table-sm">
+                    <thead><tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>@T("Status")</th><th>@T("Type")</th><th>@T("Target resource")</th></tr></thead>
+                    <tbody>
+                        @foreach (var s in Schedules)
+                        {
+                            <tr @ondblclick="() => OpenDetailAsync(s.Id, s.Name)" style="cursor: pointer;" title='@T("Double-click to open the schedule")'>
+                                <td>
+                                    <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenDetailAsync(s.Id, s.Name)">
+                                        @s.Name <span aria-hidden="true">&rsaquo;</span>
+                                    </button>
+                                </td>
+                                <td>@GetSubscriptionName(s.Id)</td>
+                                <td>@s.ResourceGroup</td>
+                                <td>@(s.Status ?? "-")</td>
+                                <td>@(s.TaskType ?? "-")</td>
+                                <td>@(s.TargetResourceId ?? "-")</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        }
+    }
+}
+
+@code {
+    private static readonly string[] Tabs = { "VM Scale Set", "Managed Disk", "Snapshot", "App Service Plan", "DevTest Lab Schedule" };
+
+    private List<VmssInfo> Vmss { get; set; } = new();
+    private List<ManagedDiskInfo> Disks { get; set; } = new();
+    private List<SnapshotInfo> Snapshots { get; set; } = new();
+    private List<AppServicePlanInfo> AppServicePlans { get; set; } = new();
+    private List<DevTestLabScheduleInfo> Schedules { get; set; } = new();
+
+    private string SelectedSubscriptionId { get; set; } = "";
+    private string ActiveTab { get; set; } = Tabs[0];
+    private readonly HashSet<string> _loadedTabsPerScope = new();
+
+    private string? DetailId { get; set; }
+    private string DetailName { get; set; } = "";
+    private ResourceOverview? DetailOverview { get; set; }
+
+
+    private string SnapshotSourceDiskId { get; set; } = "";
+    private string NewSnapshotName { get; set; } = "";
+    private string SnapshotFormMessage { get; set; } = "";
+    private bool IsRowBusy { get; set; }
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            Subscriptions = await Inventory.ListSubscriptionsAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+
+        await AutoOpenAsync();
+    }
+
+    private static readonly Dictionary<string, string> TypeTabs = new()
+    {
+        ["microsoft.compute/virtualmachinescalesets"] = "VM Scale Set",
+        ["microsoft.compute/disks"] = "Managed Disk",
+        ["microsoft.compute/snapshots"] = "Snapshot",
+        ["microsoft.web/serverfarms"] = "App Service Plan",
+        ["microsoft.devtestlab/schedules"] = "DevTest Lab Schedule",
+        ["microsoft.devtestlab/labs/schedules"] = "DevTest Lab Schedule",
+    };
+
+    private async Task AutoOpenAsync()
+    {
+        var id = RequestedResourceId;
+        if (id is null || Subscriptions.Count == 0) return;
+        if (!TypeTabs.TryGetValue(RequestedResourceType ?? "", out var tab)) return;
+
+        ActiveTab = tab;
+        await OnSubscriptionChangedAsync(RequestedSubscriptionId ?? "");
+        await OpenDetailAsync(id, RequestedResourceName ?? id);
+    }
+
+    private async Task OnSubscriptionChangedAsync(string subscriptionId)
+    {
+        SelectedSubscriptionId = subscriptionId;
+        HasLoadedAllSubscriptions = string.IsNullOrEmpty(subscriptionId);
+        ClearAll();
+        _loadedTabsPerScope.Clear();
+        CloseDetail();
+
+        await LoadActiveTabAsync();
+    }
+
+    private void ClearAll()
+    {
+        Vmss.Clear();
+        Disks.Clear();
+        Snapshots.Clear();
+        AppServicePlans.Clear();
+        Schedules.Clear();
+    }
+
+    private async Task SelectTabAsync(string tab)
+    {
+        ActiveTab = tab;
+        CloseDetail();
+        await LoadActiveTabAsync();
+    }
+
+    private static string ResourceGroupOf(string resourceId) =>
+        new Azure.Core.ResourceIdentifier(resourceId).ResourceGroupName ?? "-";
+
+    private async Task OpenDetailAsync(string id, string name)
+    {
+        if (IsBusy) return;
+
+        IsBusy = true;
+        SetStatus(T("Opening {0}...", name), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await LoadDetailAsync(id);
+            DetailId = id;
+            DetailName = name;
+            SetStatus("", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task LoadDetailAsync(string id)
+    {
+        DetailOverview = ActiveTab switch
+        {
+            "VM Scale Set" => await ComputeExtrasOps.GetVmssOverviewAsync(id),
+            "Managed Disk" => await ComputeExtrasOps.GetDiskOverviewAsync(id),
+            "Snapshot" => await ComputeExtrasOps.GetSnapshotOverviewAsync(id),
+            "App Service Plan" => await ComputeExtrasOps.GetAppServicePlanOverviewAsync(id),
+            "DevTest Lab Schedule" => await ComputeExtrasOps.GetDevTestScheduleOverviewAsync(id),
+            _ => null,
+        };
+    }
+
+    private void CloseDetail()
+    {
+        DetailId = null;
+        DetailOverview = null;
+        SetStatus("", error: false);
+    }
+
+    private async Task RefreshDetailAsync()
+    {
+        if (IsBusy || DetailId is null) return;
+
+        IsBusy = true;
+        StateHasChanged();
+
+        try
+        {
+            await LoadDetailAsync(DetailId);
+            SetStatus("", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task LoadActiveTabAsync()
+    {
+        if (_loadedTabsPerScope.Contains(ActiveTab)) return;
+
+        var subscriptionIds = string.IsNullOrEmpty(SelectedSubscriptionId)
+            ? Subscriptions.Select(s => s.SubscriptionId).ToList()
+            : new List<string> { SelectedSubscriptionId };
+
+        if (subscriptionIds.Count == 0) return;
+
+        IsLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            switch (ActiveTab)
+            {
+                case "VM Scale Set":
+                    var vmss = new List<VmssInfo>();
+                    foreach (var sub in subscriptionIds) vmss.AddRange(await ComputeExtrasOps.ListVmssAsync(sub));
+                    Vmss = vmss;
+                    break;
+                case "Managed Disk":
+                    var disks = new List<ManagedDiskInfo>();
+                    foreach (var sub in subscriptionIds) disks.AddRange(await ComputeExtrasOps.ListManagedDisksAsync(sub));
+                    Disks = disks;
+                    break;
+                case "Snapshot":
+                    var snapshots = new List<SnapshotInfo>();
+                    foreach (var sub in subscriptionIds) snapshots.AddRange(await ComputeExtrasOps.ListSnapshotsAsync(sub));
+                    Snapshots = snapshots;
+                    break;
+                case "App Service Plan":
+                    var plans = new List<AppServicePlanInfo>();
+                    foreach (var sub in subscriptionIds) plans.AddRange(await ComputeExtrasOps.ListAppServicePlansAsync(sub));
+                    AppServicePlans = plans;
+                    break;
+                case "DevTest Lab Schedule":
+                    var schedules = new List<DevTestLabScheduleInfo>();
+                    foreach (var sub in subscriptionIds) schedules.AddRange(await ComputeExtrasOps.ListDevTestLabSchedulesAsync(sub));
+                    Schedules = schedules;
+                    break;
+            }
+
+            _loadedTabsPerScope.Add(ActiveTab);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private async Task DeleteDiskAsync(string diskId)
+    {
+        // Guards against a double-click firing this twice before the "disabled" attribute
+        // re-renders in the browser: Blazor Server processes UI events one at a time per
+        // circuit, so this in-memory check is enough to make the second click a no-op.
+        if (IsRowBusy) return;
+        IsRowBusy = true;
+        SetStatus(T("Deleting disk..."), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await ComputeExtrasOps.DeleteManagedDiskAsync(diskId);
+            Disks.RemoveAll(d => d.Id == diskId);
+            SetStatus(T("Disk deleted."), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsRowBusy = false;
+        }
+    }
+
+    private async Task CreateSnapshotAsync()
+    {
+        IsRowBusy = true;
+        SnapshotFormMessage = "";
+        StateHasChanged();
+
+        try
+        {
+            var snapshot = await ComputeExtrasOps.CreateSnapshotAsync(SnapshotSourceDiskId, NewSnapshotName);
+            Snapshots.Insert(0, snapshot);
+            NewSnapshotName = "";
+            SnapshotSourceDiskId = "";
+            SetStatus(T("Snapshot \"{0}\" created.", snapshot.Name), error: false);
+        }
+        catch (Exception ex)
+        {
+            SnapshotFormMessage = ex.Message;
+        }
+        finally
+        {
+            IsRowBusy = false;
+        }
+    }
+
+    private async Task DeleteSnapshotAsync(string snapshotId)
+    {
+        // Guards against a double-click firing this twice before the "disabled" attribute
+        // re-renders in the browser: Blazor Server processes UI events one at a time per
+        // circuit, so this in-memory check is enough to make the second click a no-op.
+        if (IsRowBusy) return;
+        IsRowBusy = true;
+        SetStatus(T("Deleting snapshot..."), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await ComputeExtrasOps.DeleteSnapshotAsync(snapshotId);
+            Snapshots.RemoveAll(s => s.Id == snapshotId);
+            SetStatus(T("Snapshot deleted."), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsRowBusy = false;
+        }
+    }
+}

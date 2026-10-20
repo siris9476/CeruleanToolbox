@@ -1,0 +1,914 @@
+@page "/functions"
+@using CeruleanToolbox.Services
+@inject ResourceInventoryService Inventory
+@inject FunctionAppService Functions
+@inject AppServiceOperationsService AppServiceOps
+@inject KeyVaultSecretService KeyVaultSecrets
+@inherits CeruleanToolboxPageBase
+
+<PageTitle>Function Apps</PageTitle>
+
+<h1>Function Apps</h1>
+
+@if (SelectedFunctionApp is null)
+{
+<div class="row mb-3">
+    <div class="col-md-4">
+        <label class="form-label">@T("Subscription (optional)")</label>
+        <SearchableSelect TItem="SubscriptionInfo" Items="Subscriptions"
+                           GetLabel="@(s => $"{s.DisplayName} ({s.SubscriptionId})")" GetValue="@(s => s.SubscriptionId)"
+                           SelectedValue="SelectedSubscriptionId" SelectedValueChanged="OnSubscriptionChangedAsync"
+                           Placeholder='@T("-- all --")' Disabled="@IsLoading" />
+    </div>
+    <div class="col-md-4">
+        <label class="form-label">@T("Resource group (optional)")</label>
+        <SearchableSelect TItem="ResourceGroupInfo" Items="ResourceGroups"
+                           GetLabel="@(rg => $"{rg.Name} ({rg.Location})")" GetValue="@(rg => rg.Name)"
+                           SelectedValue="SelectedResourceGroup" SelectedValueChanged="OnResourceGroupChangedAsync"
+                           Placeholder='@T("-- all groups --")' Disabled="@(string.IsNullOrEmpty(SelectedSubscriptionId) || IsLoading)" />
+    </div>
+    <div class="col-md-4">
+        <label class="form-label">@T("Filter by name")</label>
+        <input class="form-control" placeholder='@T("filter...")' @bind="NameFilter" @bind:event="oninput" />
+    </div>
+</div>
+}
+
+@if (!string.IsNullOrEmpty(StatusMessage))
+{
+    <div class="alert @(IsError ? "alert-danger" : "alert-info")">@StatusMessage</div>
+}
+
+@if (string.IsNullOrEmpty(SelectedSubscriptionId) && !HasLoadedAllSubscriptions && !IsLoading)
+{
+    <div class="alert alert-secondary">
+        @T("No subscription selected: pick one for a quick view, or")
+        <button class="btn btn-sm btn-outline-primary" @onclick="LoadAllSubscriptionsAsync">@T("Load all subscriptions")</button>
+        @T("— it may take a while if you have many.")
+    </div>
+}
+
+@if (IsLoading)
+{
+    <div class="d-flex align-items-center gap-2 mb-3">
+        <div class="spinner-border spinner-border-sm text-primary" role="status" aria-hidden="true"></div>
+        <span>@T("Loading function apps...")</span>
+    </div>
+}
+
+@if (SelectedFunctionApp is null)
+{
+    @if (!IsLoading && (!string.IsNullOrEmpty(SelectedSubscriptionId) || HasLoadedAllSubscriptions))
+    {
+        @if (!FilteredFunctionApps.Any())
+        {
+            <p><em>@T("No function apps found.")</em></p>
+        }
+        else
+        {
+            <p class="text-muted small">@T("Click a function app's name, or double-click its row, to open it.")</p>
+            <table class="table table-sm table-hover align-middle">
+                <thead>
+                    <tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>Location</th><th>@T("Status")</th><th>@T("Actions")</th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var fa in FilteredFunctionApps)
+                    {
+                        <tr style="cursor: pointer;" title='@T("Double-click to open the function app")' @ondblclick="() => OpenFunctionAppAsync(fa)">
+                            <td>
+                                <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenFunctionAppAsync(fa)">
+                                    @fa.Name <span aria-hidden="true">&rsaquo;</span>
+                                </button>
+                            </td>
+                            <td>@GetSubscriptionName(fa.Id)</td>
+                            <td>@fa.ResourceGroup</td>
+                            <td>@fa.Location</td>
+                            <td>@fa.State</td>
+                            <td @ondblclick:stopPropagation="true">
+                                <button class="btn btn-sm btn-success" disabled="@IsBusy" @onclick="() => StartListAsync(fa)">Start</button>
+                                <ConfirmDeleteButton ConfirmText="@fa.Name" IsBusy="IsBusy" ButtonLabel="Stop"
+                                                     ConfirmLabel='@T("Confirm stop")' OnConfirmed="() => StopListAsync(fa)" />
+                                <ConfirmDeleteButton ConfirmText="@fa.Name" IsBusy="IsBusy" ButtonLabel="Restart"
+                                                     ConfirmLabel='@T("Confirm restart")' OnConfirmed="() => RestartListAsync(fa)" />
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+    }
+}
+else
+{
+    <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
+        <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" @onclick="CloseFunctionApp">&larr; Function Apps</button>
+        <h4 class="mb-0">@SelectedFunctionApp.Name</h4>
+        @if (Overview is not null)
+        {
+            <span class="badge bg-secondary">@Overview.Status</span>
+        }
+        <div class="ms-auto d-flex gap-1">
+            <button class="btn btn-sm btn-success" disabled="@IsBusy" @onclick="StartAsync">Start</button>
+            <ConfirmDeleteButton ConfirmText="@SelectedFunctionApp.Name" IsBusy="IsBusy" ButtonLabel="Stop"
+                                 ConfirmLabel='@T("Confirm stop")' OnConfirmed="StopAsync" />
+            <ConfirmDeleteButton ConfirmText="@SelectedFunctionApp.Name" IsBusy="IsBusy" ButtonLabel="Restart"
+                                 ConfirmLabel='@T("Confirm restart")' OnConfirmed="RestartAsync" />
+            <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" @onclick="RefreshOverviewAsync">@T("Refresh")</button>
+        </div>
+    </div>
+    <p class="text-muted small">
+        @GetSubscriptionName(SelectedFunctionApp.Id) · Resource group @SelectedFunctionApp.ResourceGroup · @SelectedFunctionApp.Location
+    </p>
+
+    <ul class="nav nav-tabs mb-3">
+        <li class="nav-item"><button class="nav-link @(ActiveTab == "overview" ? "active" : "")" @onclick='() => ActiveTab = "overview"'>@T("Overview")</button></li>
+        <li class="nav-item"><button class="nav-link @(ActiveTab == "functions" ? "active" : "")" @onclick='() => ActiveTab = "functions"'>@T("Functions and host keys")</button></li>
+        <li class="nav-item"><button class="nav-link @(ActiveTab == "settings" ? "active" : "")" @onclick='() => ActiveTab = "settings"'>@T("App settings")</button></li>
+        <li class="nav-item"><button class="nav-link @(ActiveTab == "logs" ? "active" : "")" @onclick='() => ActiveTab = "logs"'>@T("Invocation logs")</button></li>
+        <li class="nav-item"><button class="nav-link @(ActiveTab == "kvrefs" ? "active" : "")" @onclick='() => ActiveTab = "kvrefs"'>@T("Key Vault references")</button></li>
+    </ul>
+
+    @if (ActiveTab == "overview" && Overview is not null)
+    {
+        <ResourceOverviewView Overview="Overview" />
+    }
+    else if (ActiveTab == "functions")
+    {
+    <h3>Host keys</h3>
+    <button class="btn btn-sm btn-outline-secondary mb-2" disabled="@IsBusy" @onclick="ToggleHostKeysAsync">
+        @(HostKeysLoaded ? T("Hide host keys") : T("Show host keys"))
+    </button>
+    @if (HostKeys.Count > 0)
+    {
+        <table class="table table-sm">
+            <thead><tr><th>@T("Name")</th><th>@T("Value")</th></tr></thead>
+            <tbody>
+                @foreach (var (name, value) in HostKeys)
+                {
+                    <tr><td>@name</td><td><code>@value</code></td></tr>
+                }
+            </tbody>
+        </table>
+    }
+
+    <h3>Functions</h3>
+    <table class="table table-sm">
+        <thead><tr><th>@T("Name")</th><th>@T("Disabled")</th><th>@T("Language")</th><th>@T("Actions")</th></tr></thead>
+        <tbody>
+            @foreach (var fn in FunctionsList)
+            {
+                <tr>
+                    <td>@fn.Name</td>
+                    <td>@fn.IsDisabled</td>
+                    <td>@fn.Language</td>
+                    <td>
+                        <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" @onclick="() => ToggleFunctionKeysAsync(fn.Name)">
+                            @(SelectedFunctionName == fn.Name ? T("Hide key") : T("Show key"))
+                        </button>
+                        @if (fn.IsDisabled)
+                        {
+                            <button class="btn btn-sm btn-success" disabled="@IsBusy" @onclick="() => EnableFunctionAsync(fn.Name)">@T("Enable")</button>
+                        }
+                        else
+                        {
+                            <button class="btn btn-sm btn-warning" disabled="@IsBusy" @onclick="() => DisableFunctionAsync(fn.Name)">@T("Disable")</button>
+                        }
+                    </td>
+                </tr>
+                @if (SelectedFunctionName == fn.Name && FunctionKeys.Count > 0)
+                {
+                    <tr>
+                        <td colspan="4">
+                            @foreach (var (name, value) in FunctionKeys)
+                            {
+                                <div><strong>@name</strong>: <code>@value</code></div>
+                            }
+                        </td>
+                    </tr>
+                }
+            }
+        </tbody>
+    </table>
+
+    }
+    else if (ActiveTab == "settings")
+    {
+    <h3>App settings</h3>
+    <button class="btn btn-sm btn-outline-secondary mb-2" disabled="@IsBusy" @onclick="ToggleAppSettingsAsync">
+        @(AppSettingsLoaded ? T("Hide app settings") : T("Show app settings"))
+    </button>
+    @if (AppSettings.Count > 0)
+    {
+        <table class="table table-sm">
+            <thead><tr><th>@T("Key")</th><th>@T("Value")</th></tr></thead>
+            <tbody>
+                @foreach (var key in AppSettings.Keys.ToList())
+                {
+                    <tr>
+                        <td><code>@key</code></td>
+                        <td>
+                            <input class="form-control form-control-sm" value="@AppSettings[key]"
+                                   @onchange="@(e => AppSettings[key] = e.Value?.ToString() ?? "")" />
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+        <button class="btn btn-sm btn-primary" disabled="@IsBusy" @onclick="SaveAppSettingsAsync">@T("Save changes")</button>
+    }
+
+    }
+    else if (ActiveTab == "kvrefs")
+    {
+    <h3 class="mt-3">@T("Key Vault references")</h3>
+    <p class="form-text">
+        @T("App settings that read a secret from Key Vault (")<code>@@Microsoft.KeyVault(...)</code>@T(") and whether the platform can resolve them right now. A reference without a version follows the secret's latest version, but the app only re-reads it occasionally (about once a day) or when its configuration changes. After changing a secret use “Re-read references now”: Azure resolves them again immediately, without restarting the app (a restart alone is not documented as re-reading references: any change to the app configuration does). If you disabled the previous version of the secret before the re-read, the app has that version cached and the reference goes to “AccessToKeyVaultDenied” until it is re-read.")
+    </p>
+    <div class="d-flex flex-wrap gap-2 align-items-center mb-3">
+        <button class="btn btn-sm btn-outline-primary" disabled="@IsBusy" @onclick="LoadKeyVaultReferencesAsync">
+            @(KvReferences is null ? T("Show references") : T("Reload status"))
+        </button>
+        <button class="btn btn-sm btn-primary" disabled="@IsBusy" @onclick="RefreshKeyVaultReferencesAsync"
+                title='@T("Asks Azure to resolve all references again now, without restarting the app")'>
+            @T("Re-read references now")
+        </button>
+    </div>
+
+    @if (KvReferences is { Count: 0 })
+    {
+        <p><em>@T("This function app has no settings that point to Key Vault.")</em></p>
+    }
+    else if (KvReferences is { } references)
+    {
+        <div class="table-responsive">
+            <table class="table table-sm align-middle">
+                <thead>
+                    <tr><th>@T("Setting")</th><th>Vault</th><th>Secret</th><th>@T("Version")</th><th>@T("Status")</th><th>@T("Latest version in the vault")</th><th>@T("Details")</th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var r in references)
+                    {
+                        <tr @key="r.Setting">
+                            <td>@r.Setting</td>
+                            <td>@r.Vault</td>
+                            <td>@r.Secret</td>
+                            <td>@(r.Version == "-" ? T("latest (follows updates)") : r.Version)</td>
+                            <td><span class="badge @(r.Status == "Resolved" ? "bg-success" : "bg-danger")">@r.Status</span></td>
+                            <td class="text-nowrap small">@(KvLatest.GetValueOrDefault($"{r.Vault}/{r.Secret}", "-"))</td>
+                            <td class="small">@r.Details</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+        <p class="form-text">
+            @T("“Resolved” means the app can read the secret, not that it already has the latest value. The “Latest version in the vault” column shows when the latest version was created (dates only, never the values): if it is more recent than the app's last restart, the app may still be using the previous value.")
+        </p>
+    }
+    }
+    else if (ActiveTab == "logs")
+    {
+    <h3 class="mt-3">@T("Invocation logs")</h3>
+    <div class="row g-2 align-items-end mb-3">
+        <div class="col-auto">
+            <label class="form-label small mb-0">@T("Range")</label>
+            <select class="form-select form-select-sm" @bind="LogHours">
+                <option value="1">@T("Last hour")</option>
+                <option value="6">@T("Last 6 hours")</option>
+                <option value="24">@T("Last 24 hours")</option>
+                <option value="72">@T("Last 3 days")</option>
+                <option value="168">@T("Last 7 days")</option>
+            </select>
+        </div>
+        <div class="col-auto">
+            <label class="form-label small mb-0">@T("Max rows")</label>
+            <select class="form-select form-select-sm" @bind="LogMaxRows">
+                <option value="50">50</option>
+                <option value="200">200</option>
+                <option value="1000">1000</option>
+            </select>
+        </div>
+        <div class="col-auto form-check ms-2 mb-1">
+            <input id="onlyFailures" type="checkbox" class="form-check-input" @bind="LogOnlyFailures" />
+            <label for="onlyFailures" class="form-check-label small">@T("Errors only")</label>
+        </div>
+        <div class="col-auto">
+            <button class="btn btn-sm btn-outline-primary" disabled="@IsBusy" @onclick="LoadInvocationsAsync">
+                @(InvocationReport is null ? T("Show logs") : T("Refresh"))
+            </button>
+        </div>
+    </div>
+
+    @if (InvocationReport is { HasAppInsights: false })
+    {
+        <p><em>@T("No logs available: the function app has no linked Application Insights.")</em></p>
+    }
+    else if (InvocationReport is { } report)
+    {
+        <h5>@T("Summary per function ({0})", LogRangeLabel)</h5>
+        @if (report.Summary.Count == 0)
+        {
+            <p><em>@T("No invocations in the selected range.")</em></p>
+        }
+        else
+        {
+            <div class="table-responsive">
+                <table class="table table-sm align-middle">
+                    <thead><tr><th>@T("Function")</th><th class="text-end">@T("Invocations")</th><th class="text-end">@T("Errors")</th><th class="text-end">@T("% errors")</th><th>@T("Last error")</th><th>@T("Last exception message")</th></tr></thead>
+                    <tbody>
+                        @foreach (var item in report.Summary)
+                        {
+                            <tr class="@(item.Failures > 0 ? "table-danger" : "")">
+                                <td>@item.Function</td>
+                                <td class="text-end">@item.Total</td>
+                                <td class="text-end">@item.Failures</td>
+                                <td class="text-end">@(item.Total == 0 ? "-" : (100.0 * item.Failures / item.Total).ToString("0.#") + "%")</td>
+                                <td class="text-nowrap">@(item.LastFailure is { } at && at.Year > 1 ? at.LocalDateTime.ToString("g") : "-")</td>
+                                <td class="small">
+                                    @if (item.Failures > 0 && !string.IsNullOrEmpty(item.LastError))
+                                    {
+                                        <span class="text-muted">@item.LastErrorType</span> <span>@item.LastError</span>
+                                    }
+                                    else if (item.Failures > 0)
+                                    {
+                                        <span class="text-muted">@T("no exception or detailed error log in Application Insights (only the “Executed … Failed” line)")</span>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+
+        <h5>@T(LogOnlyFailures ? "Failed invocations ({0}{1})" : "Invocations ({0}{1})", report.Invocations.Count, report.Invocations.Count >= LogMaxRows ? T(", limit {0}", LogMaxRows) : "")</h5>
+        @if (report.Invocations.Count == 0)
+        {
+            <p><em>@T("No invocations to show.")</em></p>
+        }
+        else
+        {
+            <div class="table-responsive">
+                <table class="table table-sm">
+                    <thead><tr><th>@T("Time")</th><th>@T("Function")</th><th>@T("Result")</th><th>Result code</th><th>@T("Duration (ms)")</th></tr></thead>
+                    <tbody>
+                        @foreach (var log in report.Invocations)
+                        {
+                            <tr>
+                                <td class="text-nowrap">@log.Timestamp.LocalDateTime</td>
+                                <td>@log.OperationName</td>
+                                <td>@(log.Success ? "OK" : T("Error"))</td>
+                                <td>@log.ResultCode</td>
+                                <td>@log.DurationMs.ToString("N0")</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    }
+    }
+}
+
+@code {
+    private List<ResourceGroupInfo> ResourceGroups { get; set; } = new();
+    private List<FunctionAppInfo> FunctionAppList { get; set; } = new();
+    private List<FunctionInfo> FunctionsList { get; set; } = new();
+    private Dictionary<string, string> HostKeys { get; set; } = new();
+    private Dictionary<string, string> FunctionKeys { get; set; } = new();
+    private Dictionary<string, string> AppSettings { get; set; } = new();
+    private FunctionInvocationReport? InvocationReport { get; set; }
+    private int LogHours { get; set; } = 24;
+    private int LogMaxRows { get; set; } = 200;
+    private bool LogOnlyFailures { get; set; }
+    private string LogRangeLabel { get; set; } = "";
+    private bool HostKeysLoaded { get; set; }
+    private bool AppSettingsLoaded { get; set; }
+
+    private string SelectedSubscriptionId { get; set; } = "";
+    private string SelectedResourceGroup { get; set; } = "";
+    private string SelectedFunctionAppId { get; set; } = "";
+    private string? SelectedFunctionName { get; set; }
+
+    private ResourceOverview? Overview { get; set; }
+    private string ActiveTab { get; set; } = "overview";
+    private string NameFilter { get; set; } = "";
+
+    private FunctionAppInfo? SelectedFunctionApp =>
+        FunctionAppList.FirstOrDefault(f => f.Id == SelectedFunctionAppId);
+
+    private IEnumerable<FunctionAppInfo> FilteredFunctionApps => VisibleFunctionApps.Where(f =>
+        string.IsNullOrWhiteSpace(NameFilter) || f.Name.Contains(NameFilter, StringComparison.OrdinalIgnoreCase));
+
+    // Function apps are always fetched at the "all resource groups" grain, so the resource-group
+    // dropdown filters client-side here instead of triggering a second round trip.
+    private IEnumerable<FunctionAppInfo> VisibleFunctionApps => FunctionAppList.Where(f =>
+        string.IsNullOrEmpty(SelectedResourceGroup) || string.Equals(f.ResourceGroup, SelectedResourceGroup, StringComparison.OrdinalIgnoreCase));
+
+    // Every function app carries its full ARM resource ID, which already embeds the
+    // subscription — reused here instead of threading a subscription name/id through the service.
+    // GetSubscriptionName itself comes from CeruleanToolboxPageBase; only the id-extraction helper
+    // (also needed standalone below) stays page-local.
+    private static string? GetSubscriptionId(string resourceId)
+    {
+        var parts = resourceId.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        var idx = Array.IndexOf(parts, "subscriptions");
+        return idx >= 0 && idx + 1 < parts.Length ? parts[idx + 1] : null;
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            Subscriptions = await Inventory.ListSubscriptionsAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+
+        await AutoOpenAsync();
+    }
+
+    private async Task AutoOpenAsync()
+    {
+        var id = RequestedResourceId;
+        if (id is null || Subscriptions.Count == 0) return;
+
+        await OnSubscriptionChangedAsync(RequestedSubscriptionId ?? "");
+        var item = FunctionAppList.FirstOrDefault(x => string.Equals(x.Id, id, StringComparison.OrdinalIgnoreCase));
+        if (item is not null)
+        {
+            await OpenFunctionAppAsync(item);
+        }
+    }
+
+    private async Task OnSubscriptionChangedAsync(string subscriptionId)
+    {
+        SelectedSubscriptionId = subscriptionId;
+        ResourceGroups.Clear();
+        SelectedResourceGroup = "";
+        ClearFunctionAppSelection();
+        HasLoadedAllSubscriptions = false;
+
+        // Clearing back to "all" doesn't auto-load: fetching every subscription is expensive,
+        // so it waits for the explicit button below instead of firing on every selection change.
+        if (string.IsNullOrEmpty(SelectedSubscriptionId)) return;
+
+        IsLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            ResourceGroups = await Inventory.ListResourceGroupsAsync(SelectedSubscriptionId);
+            await LoadFunctionAppListAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private async Task LoadAllSubscriptionsAsync()
+    {
+        HasLoadedAllSubscriptions = true;
+        IsLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            await LoadFunctionAppListAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private async Task LoadFunctionAppListAsync()
+    {
+        if (string.IsNullOrEmpty(SelectedSubscriptionId))
+        {
+            var apps = new List<FunctionAppInfo>();
+            foreach (var sub in Subscriptions)
+            {
+                apps.AddRange(await Functions.ListAllFunctionAppsAsync(sub.SubscriptionId));
+            }
+
+            FunctionAppList = apps;
+        }
+        else
+        {
+            FunctionAppList = await Functions.ListAllFunctionAppsAsync(SelectedSubscriptionId);
+        }
+    }
+
+    private void OnResourceGroupChangedAsync(string resourceGroup)
+    {
+        // FunctionAppList already holds every function app in scope; the resource group filter
+        // is applied client-side via VisibleFunctionApps, no extra call needed.
+        SelectedResourceGroup = resourceGroup;
+        SelectedFunctionAppId = "";
+        FunctionsList.Clear();
+        HostKeys.Clear();
+        HostKeysLoaded = false;
+        FunctionKeys.Clear();
+        SelectedFunctionName = null;
+        AppSettings.Clear();
+        AppSettingsLoaded = false;
+        InvocationReport = null;
+        KvReferences = null;
+    }
+
+    private async Task OpenFunctionAppAsync(FunctionAppInfo app)
+    {
+        if (IsBusy) return;
+
+        IsBusy = true;
+        SetStatus(T("Opening {0}...", app.Name), error: false);
+        StateHasChanged();
+
+        try
+        {
+            Overview = await AppServiceOps.GetOverviewAsync(app.Id);
+            SelectedFunctionAppId = app.Id;
+            ActiveTab = "overview";
+            FunctionsList.Clear();
+            HostKeys.Clear();
+            HostKeysLoaded = false;
+            FunctionKeys.Clear();
+            SelectedFunctionName = null;
+            AppSettings.Clear();
+            AppSettingsLoaded = false;
+            InvocationReport = null;
+            KvReferences = null;
+            await LoadFunctionsAsync();
+            SetStatus("", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private void CloseFunctionApp()
+    {
+        SelectedFunctionAppId = "";
+        Overview = null;
+        FunctionsList.Clear();
+        HostKeys.Clear();
+        HostKeysLoaded = false;
+        FunctionKeys.Clear();
+        SelectedFunctionName = null;
+        AppSettings.Clear();
+        AppSettingsLoaded = false;
+        InvocationReport = null;
+        KvReferences = null;
+        SetStatus("", error: false);
+    }
+
+    private async Task RefreshOverviewAsync()
+    {
+        if (IsBusy || string.IsNullOrEmpty(SelectedFunctionAppId)) return;
+
+        IsBusy = true;
+        StateHasChanged();
+
+        try
+        {
+            Overview = await AppServiceOps.GetOverviewAsync(SelectedFunctionAppId);
+            SetStatus("", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private Task StartListAsync(FunctionAppInfo app) => RunListActionAsync(app, AppServiceOps.StartAsync, "Starting {0}...");
+    private Task StopListAsync(FunctionAppInfo app) => RunListActionAsync(app, AppServiceOps.StopAsync, "Stopping {0}...");
+    private Task RestartListAsync(FunctionAppInfo app) => RunListActionAsync(app, AppServiceOps.RestartAsync, "Restarting {0}...");
+
+    // statusFormat is the English text of the progress message; it is translated here.
+    private async Task RunListActionAsync(FunctionAppInfo app, Func<string, CancellationToken, Task> action, string statusFormat)
+    {
+        if (IsBusy) return;
+
+        IsBusy = true;
+        SetStatus(T(statusFormat, app.Name), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await action(app.Id, CancellationToken.None);
+            await LoadFunctionAppListAsync();
+            SetStatus(T("Operation completed."), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task LoadFunctionsAsync()
+    {
+        try
+        {
+            FunctionsList = await Functions.ListFunctionsAsync(SelectedFunctionAppId);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+    }
+
+    private void ClearFunctionAppSelection()
+    {
+        FunctionAppList.Clear();
+        SelectedFunctionAppId = "";
+        FunctionsList.Clear();
+        HostKeys.Clear();
+        HostKeysLoaded = false;
+        FunctionKeys.Clear();
+        SelectedFunctionName = null;
+        AppSettings.Clear();
+        AppSettingsLoaded = false;
+        InvocationReport = null;
+        KvReferences = null;
+    }
+
+    private async Task ToggleHostKeysAsync()
+    {
+        if (HostKeysLoaded)
+        {
+            HostKeys.Clear();
+            HostKeysLoaded = false;
+            return;
+        }
+
+        IsBusy = true;
+        StateHasChanged();
+
+        try
+        {
+            HostKeys = await Functions.GetHostKeysAsync(SelectedFunctionAppId);
+            HostKeysLoaded = true;
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task ToggleFunctionKeysAsync(string functionName)
+    {
+        if (SelectedFunctionName == functionName)
+        {
+            SelectedFunctionName = null;
+            FunctionKeys.Clear();
+            return;
+        }
+
+        IsBusy = true;
+        StateHasChanged();
+
+        try
+        {
+            FunctionKeys = await Functions.GetFunctionKeysAsync(SelectedFunctionAppId, functionName);
+            SelectedFunctionName = functionName;
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private Task EnableFunctionAsync(string functionName) => SetFunctionEnabledAsync(functionName, enabled: true);
+    private Task DisableFunctionAsync(string functionName) => SetFunctionEnabledAsync(functionName, enabled: false);
+
+    private async Task SetFunctionEnabledAsync(string functionName, bool enabled)
+    {
+        IsBusy = true;
+        SetStatus(enabled ? T("Enabling {0}...", functionName) : T("Disabling {0}...", functionName), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await Functions.SetFunctionEnabledAsync(SelectedFunctionAppId, functionName, enabled);
+            await LoadFunctionsAsync();
+            SetStatus(T("Operation completed."), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task ToggleAppSettingsAsync()
+    {
+        if (AppSettingsLoaded)
+        {
+            AppSettings.Clear();
+            AppSettingsLoaded = false;
+            return;
+        }
+
+        IsBusy = true;
+        StateHasChanged();
+
+        try
+        {
+            AppSettings = await Functions.GetAppSettingsAsync(SelectedFunctionAppId);
+            AppSettingsLoaded = true;
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task SaveAppSettingsAsync()
+    {
+        IsBusy = true;
+        SetStatus(T("Saving app settings..."), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await Functions.SetAppSettingsAsync(SelectedFunctionAppId, AppSettings);
+            SetStatus(T("App settings saved."), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task LoadInvocationsAsync()
+    {
+        IsBusy = true;
+        SetStatus(T("Reading logs..."), error: false);
+        StateHasChanged();
+
+        try
+        {
+            // Resolve the function app's own subscription, not the (possibly empty) page-level
+            // filter, since App Insights component lookup needs a concrete subscription.
+            var subscriptionId = GetSubscriptionId(SelectedFunctionAppId) ?? SelectedSubscriptionId;
+            InvocationReport = await Functions.GetInvocationReportAsync(
+                subscriptionId, SelectedFunctionAppId, new FunctionInvocationQuery(LogHours, LogMaxRows, LogOnlyFailures));
+            LogRangeLabel = LogHours switch
+            {
+                1 => T("past hour"),
+                < 48 => T("past {0} hours", LogHours),
+                _ => T("past {0} days", LogHours / 24),
+            };
+            SetStatus("", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private List<KeyVaultReferenceInfo>? KvReferences { get; set; }
+    private Dictionary<string, string> KvLatest { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    private async Task LoadKeyVaultReferencesAsync()
+    {
+        IsBusy = true;
+        SetStatus(T("Reading references..."), error: false);
+        StateHasChanged();
+
+        try
+        {
+            var references = await Functions.GetKeyVaultReferencesAsync(SelectedFunctionAppId);
+            var latest = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            // Best effort, metadata only: when the version history of a secret cannot be read (no permission, vault behind a firewall) the cell stays "-".
+            foreach (var group in references.GroupBy(r => (r.Vault, r.Secret)))
+            {
+                try
+                {
+                    var versions = await KeyVaultSecrets.ListSecretVersionsAsync($"https://{group.Key.Vault}.vault.azure.net/", group.Key.Secret);
+                    if (versions.FirstOrDefault()?.CreatedOn is { } created)
+                    {
+                        latest[$"{group.Key.Vault}/{group.Key.Secret}"] = $"{created.LocalDateTime:g} ({(versions.Count == 1 ? T("{0} version", versions.Count) : T("{0} versions", versions.Count))})";
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            KvLatest = latest;
+            KvReferences = references;
+            SetStatus("", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    // Asks App Service to resolve every Key Vault reference again now (no restart), then shows the new status.
+    private async Task RefreshKeyVaultReferencesAsync()
+    {
+        IsBusy = true;
+        SetStatus(T("Requesting a re-read of the references..."), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await Functions.RefreshKeyVaultReferencesAsync(SelectedFunctionAppId);
+            await Task.Delay(TimeSpan.FromSeconds(5)); // the platform resolves them in the background
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+            IsBusy = false;
+            return;
+        }
+
+        IsBusy = false;
+        await LoadKeyVaultReferencesAsync();
+        SetStatus(T("Re-read requested: if any reference is still failing, reload the status in a few seconds."), error: false);
+    }
+
+    private Task StartAsync() => RunLifecycleActionAsync(AppServiceOps.StartAsync, "Starting...");
+    private Task StopAsync() => RunLifecycleActionAsync(AppServiceOps.StopAsync, "Stopping...");
+    private Task RestartAsync() => RunLifecycleActionAsync(AppServiceOps.RestartAsync, "Restarting...");
+
+    // statusText is the English text of the progress message; it is translated here.
+    private async Task RunLifecycleActionAsync(Func<string, CancellationToken, Task> action, string statusText)
+    {
+        IsBusy = true;
+        SetStatus(T(statusText), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await action(SelectedFunctionAppId, CancellationToken.None);
+            await LoadFunctionAppListAsync();
+            Overview = await AppServiceOps.GetOverviewAsync(SelectedFunctionAppId);
+            SetStatus(T("Operation completed."), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+}

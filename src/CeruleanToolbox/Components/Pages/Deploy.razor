@@ -1,0 +1,148 @@
+@page "/deploy"
+@using CeruleanToolbox.Services
+@inject PageStateStore PageState
+@inject ResourceInventoryService Inventory
+@inject DeploymentService Deployer
+
+<PageTitle>Deploy</PageTitle>
+
+<h1>Deploy template</h1>
+<p>@T("Deploy an ARM (JSON) or Bicep template to a resource group, like a pipeline deploy step would — but on demand.")</p>
+
+<div class="row mb-3">
+    <div class="col-md-4">
+        <label class="form-label">Subscription</label>
+        <SearchableSelect TItem="SubscriptionInfo" Items="Subscriptions"
+                           GetLabel="@(s => $"{s.DisplayName} ({s.SubscriptionId})")" GetValue="@(s => s.SubscriptionId)"
+                           SelectedValue="SelectedSubscriptionId" SelectedValueChanged="OnSubscriptionChangedAsync" />
+    </div>
+    <div class="col-md-4">
+        <label class="form-label">Resource Group</label>
+        <SearchableSelect TItem="ResourceGroupInfo" Items="ResourceGroups"
+                           GetLabel="@(rg => $"{rg.Name} ({rg.Location})")" GetValue="@(rg => rg.Name)"
+                           SelectedValue="SelectedResourceGroup" SelectedValueChanged="@(v => SelectedResourceGroup = v)"
+                           Disabled="@(string.IsNullOrEmpty(SelectedSubscriptionId))" />
+    </div>
+    <div class="col-md-4">
+        <label class="form-label">@T("Deployment name")</label>
+        <input class="form-control" @bind="DeploymentName" placeholder='@T("e.g. manual-deploy-01")' />
+    </div>
+</div>
+
+<div class="row mb-3">
+    <div class="col-md-6">
+        <label class="form-label">@T("Template format")</label>
+        <select class="form-select" @bind="TemplateFormat">
+            <option value="arm">ARM JSON</option>
+            <option value="bicep">@T("Bicep (will be compiled with the local 'bicep' CLI)")</option>
+        </select>
+    </div>
+</div>
+
+<div class="row mb-3">
+    <div class="col-md-6">
+        <label class="form-label">Template</label>
+        <textarea class="form-control" rows="14" @bind="TemplateSource" placeholder='@T("Paste the ARM JSON or Bicep template here")'></textarea>
+    </div>
+    <div class="col-md-6">
+        <label class="form-label">@T("Parameters (JSON, optional)")</label>
+        <textarea class="form-control" rows="14" @bind="ParametersJson" placeholder='{ "location": { "value": "westeurope" } }'></textarea>
+    </div>
+</div>
+
+<button class="btn btn-primary" disabled="@(!CanDeploy || IsBusy)" @onclick="DeployAsync">
+    @(IsBusy ? T("Deploying...") : "Deploy")
+</button>
+
+@if (!string.IsNullOrEmpty(StatusMessage))
+{
+    <div class="alert @(IsError ? "alert-danger" : "alert-success") mt-3">@StatusMessage</div>
+}
+
+@code {
+    private List<SubscriptionInfo> Subscriptions { get; set; } = new();
+    private List<ResourceGroupInfo> ResourceGroups { get; set; } = new();
+
+    private string SelectedSubscriptionId { get; set; } = "";
+    private string SelectedResourceGroup { get; set; } = "";
+    private string DeploymentName { get; set; } = $"manual-deploy-{DateTime.UtcNow:yyyyMMddHHmmss}";
+    private string TemplateFormat { get; set; } = "arm";
+    private string TemplateSource { get; set; } = "";
+    private string ParametersJson { get; set; } = "";
+
+    private string StatusMessage { get; set; } = "";
+    private bool IsError { get; set; }
+    private bool IsBusy { get; set; }
+
+    private bool CanDeploy =>
+        !string.IsNullOrEmpty(SelectedSubscriptionId) &&
+        !string.IsNullOrEmpty(SelectedResourceGroup) &&
+        !string.IsNullOrWhiteSpace(DeploymentName) &&
+        !string.IsNullOrWhiteSpace(TemplateSource);
+
+    protected override void OnInitialized() => PageState.Attach(this);
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            Subscriptions = await Inventory.ListSubscriptionsAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+    }
+
+    private async Task OnSubscriptionChangedAsync(string subscriptionId)
+    {
+        SelectedSubscriptionId = subscriptionId;
+        ResourceGroups.Clear();
+        SelectedResourceGroup = "";
+        if (string.IsNullOrEmpty(SelectedSubscriptionId)) return;
+
+        try
+        {
+            ResourceGroups = await Inventory.ListResourceGroupsAsync(SelectedSubscriptionId);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+    }
+
+    private async Task DeployAsync()
+    {
+        IsBusy = true;
+        SetStatus(T("Deploying..."), error: false);
+        StateHasChanged();
+
+        try
+        {
+            var armJson = TemplateFormat == "bicep"
+                ? await Deployer.CompileBicepAsync(TemplateSource)
+                : TemplateSource;
+
+            var outcome = await Deployer.DeployTemplateAsync(
+                SelectedSubscriptionId, SelectedResourceGroup, armJson,
+                string.IsNullOrWhiteSpace(ParametersJson) ? null : ParametersJson,
+                DeploymentName);
+
+            SetStatus(outcome.Message, error: !outcome.Succeeded);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private void SetStatus(string message, bool error)
+    {
+        StatusMessage = message;
+        IsError = error;
+    }
+}

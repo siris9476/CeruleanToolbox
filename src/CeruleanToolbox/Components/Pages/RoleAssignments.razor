@@ -1,0 +1,369 @@
+@page "/roles"
+@using CeruleanToolbox.Services
+@inject PageStateStore PageState
+@inject ResourceInventoryService Inventory
+@inject RoleAssignmentService RoleAssignmentSvc
+
+<PageTitle>@T("Roles")</PageTitle>
+
+<h1>@T("Assigned roles")</h1>
+<p>
+    @T("Shows on which scopes (subscription, resource group or single resource) the active connection actually has a role assignment — unlike the resource inventory in")
+    <a href="/query">Query</a>@T(", which lists everything that is reachable through RBAC inheritance (e.g. if the role is Owner on the subscription, every resource below it is covered, but here you see where the assignment was really made).")
+</p>
+
+<div class="row mb-3">
+    <div class="col-md-6">
+        <label class="form-label">@T("Subscription (optional — empty = My assignments on all)")</label>
+        <SearchableSelect TItem="SubscriptionInfo" Items="Subscriptions"
+                           GetLabel="@(s => $"{s.DisplayName} ({s.SubscriptionId})")" GetValue="@(s => s.SubscriptionId)"
+                           SelectedValue="SelectedSubscriptionId" SelectedValueChanged="OnSubscriptionChangedAsync"
+                           Placeholder='@T("-- all --")' Disabled="@IsLoading" />
+    </div>
+</div>
+
+@if (!string.IsNullOrEmpty(StatusMessage))
+{
+    <div class="alert @(IsError ? "alert-danger" : "alert-info")">@StatusMessage</div>
+}
+
+@if (string.IsNullOrEmpty(SelectedSubscriptionId) && !HasLoadedAllSubscriptions && !IsLoading)
+{
+    <div class="alert alert-secondary">
+        @T("No subscription selected:")
+        <button class="btn btn-sm btn-outline-primary" @onclick="LoadAllSubscriptionsAsync">@T("Load my assignments on all subscriptions")</button>
+        @T("— it may take a few more seconds if you have many.")
+    </div>
+}
+
+@if (!string.IsNullOrEmpty(PrincipalId))
+{
+    <p>@T("Object ID of the service principal (from the claim") <code>oid</code> @T("of its token):") <code>@PrincipalId</code></p>
+}
+
+@if (Assignments.Count > 0)
+{
+    <table class="table table-sm">
+        <thead><tr><th>@T("Role")</th><th>Scope</th></tr></thead>
+        <tbody>
+            @foreach (var a in Assignments)
+            {
+                <tr><td>@a.RoleName</td><td title="@a.Scope">@ScopeView(a.Scope)</td></tr>
+            }
+        </tbody>
+    </table>
+}
+
+@if (IsLoading)
+{
+    <div class="d-flex align-items-center gap-2 mb-3">
+        <div class="spinner-border spinner-border-sm text-primary" role="status" aria-hidden="true"></div>
+        <span>@T("Searching assigned roles...")</span>
+    </div>
+}
+
+@if (string.IsNullOrEmpty(SelectedSubscriptionId) && !IsLoading)
+{
+    <p class="text-muted">@T("Select a single subscription to assign or revoke roles — it requires a specific scope.")</p>
+}
+
+@if (!string.IsNullOrEmpty(SelectedSubscriptionId))
+{
+    <hr />
+    <h2>@T("Role management — all users of the subscription")</h2>
+    <p>
+        @T("Lists, assigns and revokes roles for any user, group or service principal in the selected subscription. Names are resolved via Microsoft Graph when possible: RBAC assignments (even Owner) do not grant any permission on Graph by themselves, so if the resolution fails you will see the Object ID instead of the name — this is not an error.")
+    </p>
+
+    <button class="btn btn-sm btn-outline-secondary mb-2" disabled="@IsBusy" @onclick="LoadAllAssignmentsAsync">
+        @T("Load all assignments")
+    </button>
+
+    @if (AllAssignments.Count > 0)
+    {
+        <table class="table table-sm">
+            <thead><tr><th>Principal</th><th>@T("Type")</th><th>@T("Role")</th><th>Scope</th><th></th></tr></thead>
+            <tbody>
+                @foreach (var a in AllAssignments)
+                {
+                    <tr @key="a.AssignmentId">
+                        <td>@(a.PrincipalName ?? a.PrincipalId)</td>
+                        <td>@a.PrincipalType</td>
+                        <td>@a.RoleName</td>
+                        <td title="@a.Scope">@ScopeView(a.Scope)</td>
+                        <td>
+                            <ConfirmDeleteButton ConfirmText="@a.RoleName" ButtonLabel='@T("Revoke")'IsBusy="IsBusy"
+                                                  OnConfirmed="() => ConfirmDeleteAsync(a.AssignmentId)" />
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+
+    <h3>@T("Assign a new role")</h3>
+    <div class="row mb-3">
+        <div class="col-md-3">
+            <input class="form-control" placeholder='@T("Principal Object ID (user/group/SP)")' @bind="NewPrincipalId" />
+        </div>
+        <div class="col-md-3">
+            <SearchableSelect TItem="RoleDefinitionSummary" Items="RoleDefinitions"
+                               GetLabel="@(role => role.Name)" GetValue="@(role => role.Id)"
+                               SelectedValue="NewRoleDefinitionId" SelectedValueChanged="@(v => NewRoleDefinitionId = v)"
+                               Placeholder='@T("-- role --")' />
+        </div>
+        <div class="col-md-3">
+            <SearchableSelect TItem="ResourceGroupInfo" Items="ResourceGroups"
+                               GetLabel="@(rg => rg.Name)" GetValue="@(rg => rg.Name)"
+                               SelectedValue="NewAssignmentResourceGroup" SelectedValueChanged="@(v => NewAssignmentResourceGroup = v)"
+                               Placeholder='@T("-- whole subscription --")' />
+        </div>
+        <div class="col-md-3">
+            <button class="btn btn-primary" disabled="@(!CanAssign || IsBusy)" @onclick="AssignRoleAsync">@T("Assign")</button>
+        </div>
+    </div>
+}
+
+@code {
+    private List<SubscriptionInfo> Subscriptions { get; set; } = new();
+    private List<ResourceGroupInfo> ResourceGroups { get; set; } = new();
+    private List<RoleAssignmentInfo> Assignments { get; set; } = new();
+    private List<RoleAssignmentDetail> AllAssignments { get; set; } = new();
+    private List<RoleDefinitionSummary> RoleDefinitions { get; set; } = new();
+
+    private string SelectedSubscriptionId { get; set; } = "";
+    private string? PrincipalId { get; set; }
+
+    private string NewPrincipalId { get; set; } = "";
+    private string NewRoleDefinitionId { get; set; } = "";
+    private string NewAssignmentResourceGroup { get; set; } = "";
+
+    private bool CanAssign =>
+        !string.IsNullOrWhiteSpace(NewPrincipalId) &&
+        !string.IsNullOrWhiteSpace(NewRoleDefinitionId) &&
+        Guid.TryParse(NewPrincipalId, out _);
+
+    private string StatusMessage { get; set; } = "";
+    private bool IsError { get; set; }
+    private bool IsBusy { get; set; }
+    private bool IsLoading { get; set; }
+    private bool HasLoadedAllSubscriptions { get; set; }
+
+    protected override void OnInitialized() => PageState.Attach(this);
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            Subscriptions = await Inventory.ListSubscriptionsAsync();
+            PrincipalId = await RoleAssignmentSvc.GetOwnPrincipalIdAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+    }
+
+    private async Task OnSubscriptionChangedAsync(string subscriptionId)
+    {
+        SelectedSubscriptionId = subscriptionId;
+        Assignments.Clear();
+        AllAssignments.Clear();
+        ResourceGroups.Clear();
+        RoleDefinitions.Clear();
+        HasLoadedAllSubscriptions = false;
+
+        // Clearing back to "all" doesn't auto-load: fetching every subscription is expensive,
+        // so it waits for the explicit button below instead of firing on every selection change.
+        if (string.IsNullOrEmpty(SelectedSubscriptionId)) return;
+
+        IsLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            ResourceGroups = await Inventory.ListResourceGroupsAsync(SelectedSubscriptionId);
+            RoleDefinitions = await RoleAssignmentSvc.ListBuiltInRoleDefinitionsAsync(SelectedSubscriptionId);
+
+            if (PrincipalId is not null)
+            {
+                Assignments = await RoleAssignmentSvc.ListForPrincipalAsync(SelectedSubscriptionId, PrincipalId);
+                SetStatus(T("Assignments found: {0}", Assignments.Count), error: false);
+            }
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private async Task LoadAllSubscriptionsAsync()
+    {
+        HasLoadedAllSubscriptions = true;
+        IsLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            if (PrincipalId is not null)
+            {
+                var assignments = new List<RoleAssignmentInfo>();
+                foreach (var sub in Subscriptions)
+                {
+                    assignments.AddRange(await RoleAssignmentSvc.ListForPrincipalAsync(sub.SubscriptionId, PrincipalId));
+                }
+
+                Assignments = assignments;
+                SetStatus(T("Assignments found: {0} across {1} subscriptions searched", Assignments.Count, Subscriptions.Count), error: false);
+            }
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private async Task LoadAllAssignmentsAsync()
+    {
+        IsBusy = true;
+        SetStatus(T("Loading all the subscription's assignments..."), error: false);
+        StateHasChanged();
+
+        try
+        {
+            AllAssignments = await RoleAssignmentSvc.ListAllInSubscriptionAsync(SelectedSubscriptionId);
+            SetStatus(T("Assignments found: {0}", AllAssignments.Count), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task AssignRoleAsync()
+    {
+        IsBusy = true;
+        SetStatus(T("Assigning the role..."), error: false);
+        StateHasChanged();
+
+        try
+        {
+            var scope = string.IsNullOrEmpty(NewAssignmentResourceGroup)
+                ? $"/subscriptions/{SelectedSubscriptionId}"
+                : $"/subscriptions/{SelectedSubscriptionId}/resourceGroups/{NewAssignmentResourceGroup}";
+
+            await RoleAssignmentSvc.CreateAssignmentAsync(scope, NewPrincipalId, NewRoleDefinitionId);
+
+            NewPrincipalId = "";
+            NewRoleDefinitionId = "";
+            NewAssignmentResourceGroup = "";
+            await LoadAllAssignmentsAsync();
+            SetStatus(T("Role assigned."), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task ConfirmDeleteAsync(string assignmentId)
+    {
+        // Guards against a double-click firing this twice before the "disabled" attribute
+        // re-renders in the browser: Blazor Server processes UI events one at a time per
+        // circuit, so this in-memory check is enough to make the second click a no-op.
+        if (IsBusy) return;
+        IsBusy = true;
+        SetStatus(T("Revoking..."), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await RoleAssignmentSvc.DeleteAssignmentAsync(assignmentId);
+            await LoadAllAssignmentsAsync();
+            SetStatus(T("Role revoked."), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private RenderFragment ScopeView(string scope) => builder =>
+    {
+        var (kind, name, context) = DescribeScope(scope);
+        builder.OpenElement(0, "span");
+        builder.AddAttribute(1, "class", "badge bg-secondary me-1");
+        builder.AddContent(2, kind);
+        builder.CloseElement();
+        builder.OpenElement(3, "strong");
+        builder.AddContent(4, name);
+        builder.CloseElement();
+        if (!string.IsNullOrEmpty(context))
+        {
+            builder.OpenElement(5, "div");
+            builder.AddAttribute(6, "class", "text-muted small");
+            builder.AddContent(7, context);
+            builder.CloseElement();
+        }
+    };
+
+    /// <summary>Turns an ARM scope id into a readable (kind, name, context) triple.</summary>
+    private (string Kind, string Name, string Context) DescribeScope(string scope)
+    {
+        var parts = scope.Trim('/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 0) return ("Scope", scope, "");
+
+        if (parts[0].Equals("providers", StringComparison.OrdinalIgnoreCase))
+        {
+            return parts.Length >= 4 && parts[1].Equals("Microsoft.Management", StringComparison.OrdinalIgnoreCase)
+                ? ("Management group", parts[^1], "")
+                : ("Scope", scope, "");
+        }
+
+        if (!parts[0].Equals("subscriptions", StringComparison.OrdinalIgnoreCase) || parts.Length < 2)
+            return ("Scope", scope, "");
+
+        var subId = parts[1];
+        var sub = Subscriptions.FirstOrDefault(x => x.SubscriptionId.Equals(subId, StringComparison.OrdinalIgnoreCase));
+        var subName = sub?.DisplayName ?? subId;
+
+        if (parts.Length == 2) return ("Subscription", subName, subId);
+
+        var rg = parts.Length > 3 ? parts[3] : "";
+        if (parts.Length == 4) return ("Resource group", rg, subName);
+
+        var providerIdx = Array.FindIndex(parts, x => x.Equals("providers", StringComparison.OrdinalIgnoreCase));
+        if (providerIdx < 0 || parts.Length < providerIdx + 4) return (T("Resource"), parts[^1], $"{rg} · {subName}");
+
+        var typeSegments = new List<string>();
+        for (var i = providerIdx + 2; i < parts.Length; i += 2) typeSegments.Add(parts[i]);
+        var type = $"{parts[providerIdx + 1]}/{string.Join('/', typeSegments)}";
+        return (T("Resource"), parts[^1], $"{type} · {rg} · {subName}");
+    }
+
+    private void SetStatus(string message, bool error)
+    {
+        StatusMessage = message;
+        IsError = error;
+    }
+}

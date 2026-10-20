@@ -1,0 +1,1078 @@
+@page "/keyvault"
+@using CeruleanToolbox.Services
+@inject ResourceInventoryService Inventory
+@inject KeyVaultManagementService VaultMgmt
+@inject KeyVaultSecretService Secrets
+@inject KeyVaultKeyService Keys
+@inject KeyVaultCertificateService Certificates
+@inject KeyVaultDeletedService DeletedObjects
+@inherits CeruleanToolboxPageBase
+
+<PageTitle>Key Vault</PageTitle>
+
+<h1>Key Vault</h1>
+
+@if (SelectedVault is null)
+{
+    <p>
+        @T("Lists the vaults. Click a vault name, or double-click its row, to open its overview, secrets, keys and certificates.")
+    </p>
+
+    <div class="row mb-3">
+        <div class="col-md-4">
+            <label class="form-label">@T("Subscription (optional)")</label>
+            <SearchableSelect TItem="SubscriptionInfo" Items="Subscriptions"
+                               GetLabel="@(s => $"{s.DisplayName} ({s.SubscriptionId})")" GetValue="@(s => s.SubscriptionId)"
+                               SelectedValue="SelectedSubscriptionId" SelectedValueChanged="OnSubscriptionChangedAsync"
+                               Placeholder='@T("-- all --")' Disabled="@(IsLoading || IsBusy)" />
+        </div>
+        <div class="col-md-4">
+            <label class="form-label">@T("Resource group (optional)")</label>
+            <SearchableSelect TItem="ResourceGroupInfo" Items="ResourceGroups"
+                               GetLabel="@(rg => $"{rg.Name} ({rg.Location})")" GetValue="@(rg => rg.Name)"
+                               SelectedValue="SelectedResourceGroup" SelectedValueChanged="OnResourceGroupChangedAsync"
+                               Placeholder='@T("-- all groups --")' Disabled="@(string.IsNullOrEmpty(SelectedSubscriptionId) || IsLoading)" />
+        </div>
+        <div class="col-md-4">
+            <label class="form-label">@T("Filter by name")</label>
+            <input class="form-control" placeholder='@T("filter...")' @bind="NameFilter" @bind:event="oninput" />
+        </div>
+    </div>
+
+@if (!string.IsNullOrEmpty(SelectedSubscriptionId) && !string.IsNullOrEmpty(SelectedResourceGroup))
+{
+    <details class="mb-3">
+        <summary>@T("Create new vault")</summary>
+        <div class="row mt-2">
+            <div class="col-md-4">
+                <input class="form-control" placeholder='@T("Vault name")' @bind="NewVaultName" />
+            </div>
+            <div class="col-md-4">
+                <input class="form-control" placeholder='@T("Location (e.g. westeurope)")' @bind="NewVaultLocation" />
+            </div>
+            <div class="col-md-4">
+                <button class="btn btn-primary" disabled="@(string.IsNullOrWhiteSpace(NewVaultName) || string.IsNullOrWhiteSpace(NewVaultLocation) || IsBusy)" @onclick="CreateVaultAsync">@T("Create")</button>
+            </div>
+        </div>
+        <p class="form-text">@T("The vault is created with RBAC authorization. If the app's service principal is not Owner (or otherwise lacks DataActions on vaults), assign it a data role after creation (e.g. 'Key Vault Secrets Officer' / 'Key Vault Crypto Officer'), otherwise reads and writes will fail with 403.")</p>
+    </details>
+}
+
+}
+
+@if (!string.IsNullOrEmpty(StatusMessage))
+{
+    <div class="alert @(IsError ? "alert-danger" : "alert-info")">@StatusMessage</div>
+}
+
+@if (SelectedVault is null)
+{
+    @if (string.IsNullOrEmpty(SelectedSubscriptionId) && !HasLoadedAllSubscriptions && !IsLoading)
+    {
+        <div class="alert alert-secondary">
+            @T("No subscription selected: pick one for a quick view, or")
+            <button class="btn btn-sm btn-outline-primary" @onclick="LoadAllSubscriptionsAsync">@T("Load all subscriptions")</button>
+            @T("— this can take a while if you have many.")
+        </div>
+    }
+
+    @if (IsLoading)
+    {
+        <div class="d-flex align-items-center gap-2 mb-3">
+            <div class="spinner-border spinner-border-sm text-primary" role="status" aria-hidden="true"></div>
+            <span>@T("Loading vaults...")</span>
+        </div>
+    }
+
+    @if (!IsLoading && (!string.IsNullOrEmpty(SelectedSubscriptionId) || HasLoadedAllSubscriptions))
+    {
+        @if (!FilteredVaults.Any())
+        {
+            <p><em>@T("No vaults found.")</em></p>
+        }
+        else
+        {
+            <table class="table table-sm table-hover align-middle">
+                <thead>
+                    <tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>Location</th><th>URI</th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var vault in FilteredVaults)
+                    {
+                        <tr style="cursor: pointer;" title='@T("Double-click to open the vault")' @ondblclick="() => OpenVaultAsync(vault)">
+                            <td>
+                                <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenVaultAsync(vault)">
+                                    @vault.Name <span aria-hidden="true">&rsaquo;</span>
+                                </button>
+                            </td>
+                            <td>@GetSubscriptionName(vault.Id)</td>
+                            <td>@vault.ResourceGroup</td>
+                            <td>@vault.Location</td>
+                            <td><code>@vault.VaultUri</code></td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+    }
+}
+else
+{
+    <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
+        <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" @onclick="CloseVault">&larr; Key Vault</button>
+        <h4 class="mb-0">@SelectedVault.Name</h4>
+        @if (Overview is not null)
+        {
+            <span class="badge bg-secondary">@Overview.Status</span>
+        }
+        <button class="btn btn-sm btn-outline-secondary ms-auto" disabled="@IsBusy" @onclick="RefreshVaultAsync">@T("Refresh")</button>
+    </div>
+    <p class="text-muted small">
+        @GetSubscriptionName(SelectedVault.Id) · @T("Resource group {0}", SelectedVault.ResourceGroup) · @SelectedVault.Location
+    </p>
+
+    <ul class="nav nav-tabs mb-3">
+        <li class="nav-item"><button class="nav-link @(ActiveTab == "overview" ? "active" : "")" @onclick='() => ActiveTab = "overview"'>@T("Overview")</button></li>
+        <li class="nav-item"><button class="nav-link @(ActiveTab == "secrets" ? "active" : "")" @onclick='() => ActiveTab = "secrets"'>@T("Secrets ({0})", SecretList.Count)</button></li>
+        <li class="nav-item"><button class="nav-link @(ActiveTab == "keys" ? "active" : "")" @onclick='() => ActiveTab = "keys"'>@T("Keys ({0})", KeyList.Count)</button></li>
+        <li class="nav-item"><button class="nav-link @(ActiveTab == "certs" ? "active" : "")" @onclick='() => ActiveTab = "certs"'>@T("Certificates ({0})", CertificateList.Count)</button></li>
+        <li class="nav-item"><button class="nav-link @(ActiveTab == "deleted" ? "active" : "")" @onclick='() => ActiveTab = "deleted"'>@T("Deleted ({0})", DeletedList.Count)</button></li>
+    </ul>
+
+    @if (ActiveTab == "overview" && Overview is not null)
+    {
+        <ResourceOverviewView Overview="Overview" />
+    }
+    else if (ActiveTab == "secrets")
+    {
+    <h3>Secrets</h3>
+    <table class="table table-sm">
+        <thead><tr><th>@T("Name")</th><th>@T("Enabled")</th><th>@T("Updated")</th><th></th></tr></thead>
+        <tbody>
+            @foreach (var s in SecretList)
+            {
+                <tr>
+                    <td>@s.Name</td>
+                    <td>@s.Enabled</td>
+                    <td>@s.UpdatedOn</td>
+                    <td class="text-nowrap">
+                        <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" @onclick="() => ToggleSecretAsync(s.Name)">
+                            @(RevealedSecretName == s.Name ? T("Hide value") : T("Show value"))
+                        </button>
+                        <button class="btn btn-sm btn-outline-primary" disabled="@IsBusy" @onclick="() => StartEditSecret(s.Name)">
+                            @T("Update")
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" @onclick="() => ToggleVersionsAsync(s.Name)">
+                            @(VersionsSecretName == s.Name ? T("Hide versions") : T("Versions"))
+                        </button>
+                    </td>
+                </tr>
+                @if (RevealedSecretName == s.Name)
+                {
+                    <tr><td colspan="4"><code>@RevealedSecretValue</code></td></tr>
+                }
+                @if (VersionsSecretName == s.Name)
+                {
+                    <tr>
+                        <td colspan="4" class="bg-light">
+                            <table class="table table-sm mb-1">
+                                <thead><tr><th>@T("Version")</th><th>@T("Created on")</th><th>@T("Active")</th><th>@T("Expires")</th><th></th></tr></thead>
+                                <tbody>
+                                    @for (var i = 0; i < SecretVersions.Count; i++)
+                                    {
+                                        var v = SecretVersions[i];
+                                        var isCurrent = i == 0;
+                                        <tr>
+                                            <td><code>@v.Version[..Math.Min(8, v.Version.Length)]</code> @if (isCurrent) { <span class="badge bg-success">@T("current")</span> }</td>
+                                            <td>@v.CreatedOn?.ToLocalTime().ToString("dd/MM/yyyy HH:mm")</td>
+                                            <td>@v.Enabled</td>
+                                            <td>@(v.ExpiresOn?.ToLocalTime().ToString("dd/MM/yyyy") ?? "-")</td>
+                                            <td class="text-nowrap">
+                                                <button class="btn btn-sm btn-outline-secondary" disabled="@(IsBusy || !v.Enabled)" title="@(v.Enabled ? "" : T("Version disabled: enable it to read its value"))" @onclick="() => ToggleVersionValueAsync(s.Name, v.Version)">
+                                                    @(RevealedVersion == v.Version ? T("Hide value") : T("Show value"))
+                                                </button>
+                                                @if (!v.Enabled)
+                                                {
+                                                    <button class="btn btn-sm btn-outline-success" disabled="@IsBusy" @onclick="() => SetVersionEnabledAsync(s.Name, v.Version, true)">@T("Enable")</button>
+                                                }
+                                                else if (!isCurrent)
+                                                {
+                                                    <button class="btn btn-sm btn-outline-danger" disabled="@IsBusy" @onclick="() => SetVersionEnabledAsync(s.Name, v.Version, false)">@T("Disable")</button>
+                                                }
+                                                @if (!isCurrent && v.Enabled)
+                                                {
+                                                    @if (RestoringVersion == v.Version)
+                                                    {
+                                                        <button class="btn btn-sm btn-warning" disabled="@IsBusy" @onclick="() => RestoreVersionAsync(s.Name, v.Version)">@T("Confirm restore")</button>
+                                                        <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" @onclick="() => RestoringVersion = null">@T("Cancel")</button>
+                                                    }
+                                                    else
+                                                    {
+                                                        <button class="btn btn-sm btn-outline-primary" disabled="@IsBusy" @onclick="() => RestoringVersion = v.Version">@T("Restore")</button>
+                                                    }
+                                                }
+                                            </td>
+                                        </tr>
+                                        @if (RevealedVersion == v.Version)
+                                        {
+                                            <tr><td colspan="5"><code>@RevealedVersionValue</code></td></tr>
+                                        }
+                                    }
+                                </tbody>
+                            </table>
+                            <div class="form-text">@T("'Restore' saves the value of the chosen version as the new current version; existing versions are neither modified nor deleted.")</div>
+                        </td>
+                    </tr>
+                }
+                @if (EditingSecretName == s.Name)
+                {
+                    <tr>
+                        <td colspan="4" class="bg-light">
+                            <div class="row g-2 align-items-center">
+                                <div class="col-md-6">
+                                    <input type="password" class="form-control form-control-sm" placeholder='@T("New value for {0}", s.Name)'
+                                           autocomplete="new-password" @bind="EditingSecretValue" @bind:event="oninput" />
+                                </div>
+                                <div class="col-auto d-flex gap-2">
+                                    <button class="btn btn-sm btn-primary" disabled="@(string.IsNullOrEmpty(EditingSecretValue) || IsBusy)" @onclick="UpdateSecretAsync">
+                                        @T("Save new version")
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" @onclick="CancelEditSecret">@T("Cancel")</button>
+                                </div>
+                            </div>
+                            <div class="form-text">@T("Creates a new version of the secret: previous versions stay in the vault.")</div>
+                        </td>
+                    </tr>
+                }
+            }
+        </tbody>
+    </table>
+
+    <h6>@T("New secret")</h6>
+    <div class="row mb-3">
+        <div class="col-md-4"><input class="form-control" placeholder='@T("Secret name")' @bind="NewSecretName" /></div>
+        <div class="col-md-4"><input class="form-control" placeholder='@T("Value")' @bind="NewSecretValue" /></div>
+        <div class="col-md-4"><button class="btn btn-primary" disabled="@(string.IsNullOrWhiteSpace(NewSecretName) || IsBusy)" @onclick="SaveSecretAsync">@T("Create secret")</button></div>
+    </div>
+    <p class="form-text">@T("To change the value of an existing secret use the 'Update' button on its row.")</p>
+
+    }
+    else if (ActiveTab == "keys")
+    {
+    <h3>Keys</h3>
+    <table class="table table-sm">
+        <thead><tr><th>@T("Name")</th><th>@T("Active")</th><th>@T("Last updated")</th></tr></thead>
+        <tbody>
+            @foreach (var k in KeyList)
+            {
+                <tr><td>@k.Name</td><td>@k.Enabled</td><td>@k.UpdatedOn</td></tr>
+            }
+        </tbody>
+    </table>
+
+    <div class="row mb-3">
+        <div class="col-md-4"><input class="form-control" placeholder='@T("Key name")' @bind="NewKeyName" /></div>
+        <div class="col-md-4">
+            <select class="form-select" @bind="NewKeyType">
+                <option value="RSA">RSA</option>
+                <option value="EC">EC</option>
+            </select>
+        </div>
+        <div class="col-md-4"><button class="btn btn-primary" disabled="@(string.IsNullOrWhiteSpace(NewKeyName) || IsBusy)" @onclick="CreateKeyAsync">@T("Create key")</button></div>
+    </div>
+
+    }
+    else if (ActiveTab == "deleted")
+    {
+    <h3>@T("Deleted")</h3>
+    <p class="form-text">
+        @T("Secrets, keys and certificates that were soft-deleted: until the date shown they can be recovered, with all their versions. 'Delete permanently' (purge) removes them for good and cannot be undone; if the vault has purge protection on, Azure refuses the purge until the scheduled date.")
+    </p>
+    @if (!string.IsNullOrEmpty(DeletedError))
+    {
+        <div class="alert alert-warning py-2">@T("Unable to read the deleted objects: {0}", DeletedError)</div>
+    }
+    else if (DeletedList.Count == 0)
+    {
+        <p><em>@T("No deleted objects in this vault.")</em></p>
+    }
+    else
+    {
+        <div class="table-responsive">
+            <table class="table table-sm align-middle">
+                <thead><tr><th>@T("Type")</th><th>@T("Name")</th><th>@T("Deleted on")</th><th>@T("Scheduled purge")</th><th></th></tr></thead>
+                <tbody>
+                    @foreach (var d in DeletedList)
+                    {
+                        <tr @key="@($"{d.Kind}/{d.Name}")">
+                            <td>@KindLabel(d.Kind)</td>
+                            <td>@d.Name</td>
+                            <td class="text-nowrap">@(d.DeletedOn?.LocalDateTime.ToString("g") ?? "-")</td>
+                            <td class="text-nowrap">@(d.ScheduledPurgeDate?.LocalDateTime.ToString("g") ?? "-")</td>
+                            <td class="text-nowrap">
+                                <button class="btn btn-sm btn-outline-primary" disabled="@IsBusy" @onclick="() => RecoverDeletedAsync(d)">@T("Recover")</button>
+                                <ConfirmDeleteButton ConfirmText="@d.Name" IsBusy="IsBusy" ButtonLabel='@T("Delete permanently")'
+                                                     ConfirmLabel='@T("Confirm permanent deletion")' OnConfirmed="() => PurgeDeletedAsync(d)" />
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+
+    }
+    else if (ActiveTab == "certs")
+    {
+    <h3>Certificates</h3>
+    <table class="table table-sm">
+        <thead><tr><th>@T("Name")</th><th>@T("Enabled")</th><th>@T("Expires")</th><th>@T("Updated")</th><th>Thumbprint</th><th></th></tr></thead>
+        <tbody>
+            @foreach (var c in CertificateList)
+            {
+                <tr class="@(c.ExpiresOn is not null && c.ExpiresOn < DateTimeOffset.UtcNow.AddDays(30) ? "table-warning" : "")" @key="c.Name">
+                    <td>@c.Name</td>
+                    <td>@c.Enabled</td>
+                    <td>@(c.ExpiresOn?.LocalDateTime.ToString("g") ?? "-")</td>
+                    <td>@(c.UpdatedOn?.LocalDateTime.ToString("g") ?? "-")</td>
+                    <td><code>@(c.Thumbprint ?? "-")</code></td>
+                    <td>
+                        <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" @onclick="() => RenewCertificateAsync(c.Name)">@T("Renew")</button>
+                        <ConfirmDeleteButton ConfirmText="@c.Name" IsBusy="IsBusy" OnConfirmed="() => DeleteCertificateAsync(c.Name)" />
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+    <p class="form-text">
+        @T("Expirations within 30 days are highlighted. 'Renew' reissues the certificate with the same policy (same subject/validity), generating a new version with a new expiry — Key Vault has no dedicated renewal operation for self-signed certificates.")
+    </p>
+
+    <div class="row mb-3">
+        <div class="col-md-3"><input class="form-control" placeholder='@T("Certificate name")' @bind="NewCertName" /></div>
+        <div class="col-md-3"><input class="form-control" placeholder='@T("Subject CN (e.g. example.com)")' @bind="NewCertSubject" /></div>
+        <div class="col-md-2"><input type="number" class="form-control" placeholder='@T("Validity (months)")' @bind="NewCertValidityMonths" /></div>
+        <div class="col-md-4">
+            <button class="btn btn-primary" disabled="@(string.IsNullOrWhiteSpace(NewCertName) || string.IsNullOrWhiteSpace(NewCertSubject) || IsBusy)" @onclick="CreateCertificateAsync">
+                @T("Create self-signed certificate")
+            </button>
+        </div>
+    </div>
+    }
+}
+
+@code {
+    private List<ResourceGroupInfo> ResourceGroups { get; set; } = new();
+    private List<VaultInfo> Vaults { get; set; } = new();
+    private List<SecretInfo> SecretList { get; set; } = new();
+    private List<KeyInfo> KeyList { get; set; } = new();
+    private List<CertificateInfo> CertificateList { get; set; } = new();
+
+    private string SelectedSubscriptionId { get; set; } = "";
+    private string SelectedResourceGroup { get; set; } = "";
+    private string SelectedVaultId { get; set; } = "";
+    private string? SelectedVaultUri { get; set; }
+    private string NameFilter { get; set; } = "";
+    private ResourceOverview? Overview { get; set; }
+    private string ActiveTab { get; set; } = "overview";
+    private VaultInfo? SelectedVault => Vaults.FirstOrDefault(v => v.Id == SelectedVaultId);
+
+    private string NewVaultName { get; set; } = "";
+    private string NewVaultLocation { get; set; } = "";
+    private string NewSecretName { get; set; } = "";
+    private string NewSecretValue { get; set; } = "";
+    private string NewKeyName { get; set; } = "";
+    private string NewKeyType { get; set; } = "RSA";
+    private string NewCertName { get; set; } = "";
+    private string NewCertSubject { get; set; } = "";
+    private int NewCertValidityMonths { get; set; } = 12;
+
+    private string? RevealedSecretName { get; set; }
+    private string? RevealedSecretValue { get; set; }
+
+    // Inline "Aggiorna" on a secret row: the new value never leaves this field until it is saved as a new version.
+    private string? EditingSecretName { get; set; }
+    private string EditingSecretValue { get; set; } = "";
+
+    // Version history of one secret, opened from the "Versions" button on its row.
+    private string? VersionsSecretName { get; set; }
+    private List<SecretVersionInfo> SecretVersions { get; set; } = [];
+    private string? RevealedVersion { get; set; }
+    private string? RevealedVersionValue { get; set; }
+    private string? RestoringVersion { get; set; }
+
+    private void ResetVersions()
+    {
+        VersionsSecretName = null;
+        SecretVersions = [];
+        RevealedVersion = null;
+        RevealedVersionValue = null;
+        RestoringVersion = null;
+    }
+
+    private async Task ToggleVersionsAsync(string name)
+    {
+        if (VersionsSecretName == name)
+        {
+            ResetVersions();
+            return;
+        }
+
+        if (SelectedVaultUri is null) return;
+
+        IsBusy = true;
+        StateHasChanged();
+
+        try
+        {
+            ResetVersions();
+            SecretVersions = await Secrets.ListSecretVersionsAsync(SelectedVaultUri, name);
+            VersionsSecretName = name;
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task ToggleVersionValueAsync(string name, string version)
+    {
+        if (RevealedVersion == version)
+        {
+            RevealedVersion = null;
+            RevealedVersionValue = null;
+            return;
+        }
+
+        if (SelectedVaultUri is null) return;
+
+        IsBusy = true;
+        StateHasChanged();
+
+        try
+        {
+            RevealedVersionValue = await Secrets.GetSecretVersionValueAsync(SelectedVaultUri, name, version);
+            RevealedVersion = version;
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task SetVersionEnabledAsync(string name, string version, bool enabled)
+    {
+        if (SelectedVaultUri is null) return;
+
+        IsBusy = true;
+        SetStatus(enabled ? T("Enabling the version...") : T("Disabling the version..."), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await Secrets.SetSecretVersionEnabledAsync(SelectedVaultUri, name, version, enabled);
+
+            // A value shown for a version that is now disabled is no longer readable: hide it.
+            if (!enabled && RevealedVersion == version)
+            {
+                RevealedVersion = null;
+                RevealedVersionValue = null;
+            }
+
+            RestoringVersion = null;
+            SecretVersions = await Secrets.ListSecretVersionsAsync(SelectedVaultUri, name);
+            await LoadVaultContentsAsync();
+            SetStatus(enabled ? T("Version {0} of {1} enabled.", version[..Math.Min(8, version.Length)], name) : T("Version {0} of {1} disabled.", version[..Math.Min(8, version.Length)], name), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task RestoreVersionAsync(string name, string version)
+    {
+        if (SelectedVaultUri is null) return;
+
+        IsBusy = true;
+        SetStatus(T("Restoring {0}...", name), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await Secrets.RestoreSecretVersionAsync(SelectedVaultUri, name, version);
+            await LoadVaultContentsAsync();
+
+            // The restored value is now the current version: refresh the open panels so they show it.
+            SecretVersions = await Secrets.ListSecretVersionsAsync(SelectedVaultUri, name);
+            RestoringVersion = null;
+            RevealedVersion = null;
+            RevealedVersionValue = null;
+            if (RevealedSecretName == name)
+            {
+                RevealedSecretValue = await Secrets.GetSecretValueAsync(SelectedVaultUri, name);
+            }
+
+            SetStatus(T("Secret {0}: version {1} restored as the new current version.", name, version[..Math.Min(8, version.Length)]), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private void StartEditSecret(string name)
+    {
+        EditingSecretName = EditingSecretName == name ? null : name;
+        EditingSecretValue = "";
+    }
+
+    private void CancelEditSecret()
+    {
+        EditingSecretName = null;
+        EditingSecretValue = "";
+    }
+
+    private async Task UpdateSecretAsync()
+    {
+        if (SelectedVaultUri is null || EditingSecretName is null || string.IsNullOrEmpty(EditingSecretValue)) return;
+
+        var name = EditingSecretName;
+        IsBusy = true;
+        SetStatus(T("Updating {0}...", name), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await Secrets.SetSecretValueAsync(SelectedVaultUri, name, EditingSecretValue);
+            EditingSecretName = null;
+            EditingSecretValue = "";
+
+            await LoadVaultContentsAsync();
+
+            if (VersionsSecretName == name)
+            {
+                SecretVersions = await Secrets.ListSecretVersionsAsync(SelectedVaultUri, name);
+            }
+
+            // A value shown before the update is stale: read the new one so the row refreshes by itself.
+            if (RevealedSecretName == name)
+            {
+                RevealedSecretValue = await Secrets.GetSecretValueAsync(SelectedVaultUri, name);
+            }
+
+            SetStatus(T("Secret {0} updated (new version).", name), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+
+    private IEnumerable<VaultInfo> FilteredVaults => VisibleVaults.Where(v =>
+        string.IsNullOrWhiteSpace(NameFilter) || v.Name.Contains(NameFilter, StringComparison.OrdinalIgnoreCase));
+
+    // Vaults are always fetched at the "all resource groups" grain, so the resource-group
+    // dropdown filters client-side here instead of triggering a second round trip.
+    private IEnumerable<VaultInfo> VisibleVaults => Vaults.Where(v =>
+        string.IsNullOrEmpty(SelectedResourceGroup) || string.Equals(v.ResourceGroup, SelectedResourceGroup, StringComparison.OrdinalIgnoreCase));
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            Subscriptions = await Inventory.ListSubscriptionsAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+
+        await AutoOpenAsync();
+    }
+
+    private async Task AutoOpenAsync()
+    {
+        var id = RequestedResourceId;
+        if (id is null || Subscriptions.Count == 0) return;
+
+        await OnSubscriptionChangedAsync(RequestedSubscriptionId ?? "");
+        var item = Vaults.FirstOrDefault(x => string.Equals(x.Id, id, StringComparison.OrdinalIgnoreCase));
+        if (item is not null)
+        {
+            await OpenVaultAsync(item);
+        }
+    }
+
+    private async Task OnSubscriptionChangedAsync(string subscriptionId)
+    {
+        SelectedSubscriptionId = subscriptionId;
+        ResourceGroups.Clear();
+        SelectedResourceGroup = "";
+        ClearVaultSelection();
+        HasLoadedAllSubscriptions = false;
+
+        // Clearing back to "all" doesn't auto-load: fetching every subscription is expensive,
+        // so it waits for the explicit button below instead of firing on every selection change.
+        if (string.IsNullOrEmpty(SelectedSubscriptionId)) return;
+
+        IsLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            ResourceGroups = await Inventory.ListResourceGroupsAsync(SelectedSubscriptionId);
+            await LoadVaultListAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private async Task LoadAllSubscriptionsAsync()
+    {
+        HasLoadedAllSubscriptions = true;
+        IsLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            await LoadVaultListAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private async Task LoadVaultListAsync()
+    {
+        if (string.IsNullOrEmpty(SelectedSubscriptionId))
+        {
+            var vaults = new List<VaultInfo>();
+            foreach (var sub in Subscriptions)
+            {
+                vaults.AddRange(await VaultMgmt.ListAllVaultsAsync(sub.SubscriptionId));
+            }
+
+            Vaults = vaults;
+        }
+        else
+        {
+            Vaults = await VaultMgmt.ListAllVaultsAsync(SelectedSubscriptionId);
+        }
+    }
+
+    private async Task OnResourceGroupChangedAsync(string resourceGroup)
+    {
+        SelectedResourceGroup = resourceGroup;
+        SelectedVaultId = "";
+        SelectedVaultUri = null;
+        SecretList.Clear();
+        KeyList.Clear();
+        CertificateList.Clear();
+        DeletedList = [];
+        DeletedError = "";
+        RevealedSecretName = null;
+        await Task.CompletedTask;
+    }
+
+    private async Task OpenVaultAsync(VaultInfo vault)
+    {
+        if (IsBusy) return;
+
+        IsBusy = true;
+        SetStatus(T("Opening {0}...", vault.Name), error: false);
+        StateHasChanged();
+
+        try
+        {
+            Overview = await VaultMgmt.GetOverviewAsync(vault.Id);
+            SelectedVaultId = vault.Id;
+            SelectedVaultUri = vault.VaultUri;
+            ActiveTab = "overview";
+            SecretList.Clear();
+            KeyList.Clear();
+            CertificateList.Clear();
+            DeletedList = [];
+            DeletedError = "";
+            RevealedSecretName = null;
+            SetStatus("", error: false);
+
+            // Secrets, keys and certificates are data-plane calls that need a data role on the vault;
+            // a 403 there is reported but must not stop the management-plane overview above.
+            await LoadVaultContentsAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private void CloseVault()
+    {
+        SelectedVaultId = "";
+        SelectedVaultUri = null;
+        Overview = null;
+        SecretList.Clear();
+        KeyList.Clear();
+        CertificateList.Clear();
+        DeletedList = [];
+        DeletedError = "";
+        RevealedSecretName = null;
+        SetStatus("", error: false);
+    }
+
+    private async Task RefreshVaultAsync()
+    {
+        if (IsBusy || SelectedVault is null) return;
+
+        IsBusy = true;
+        StateHasChanged();
+
+        try
+        {
+            Overview = await VaultMgmt.GetOverviewAsync(SelectedVault.Id);
+            SetStatus("", error: false);
+            await LoadVaultContentsAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task LoadVaultContentsAsync()
+    {
+        if (SelectedVaultUri is null) return;
+
+        try
+        {
+            SecretList = await Secrets.ListSecretsAsync(SelectedVaultUri);
+            KeyList = await Keys.ListKeysAsync(SelectedVaultUri);
+            CertificateList = await Certificates.ListCertificatesAsync(SelectedVaultUri);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+
+        await LoadDeletedAsync();
+    }
+
+    // Kept apart from the rest: a vault without soft-delete, or an identity without the "list deleted" permission, must not break the other tabs.
+    private async Task LoadDeletedAsync()
+    {
+        if (SelectedVaultUri is null) return;
+
+        try
+        {
+            DeletedList = await DeletedObjects.ListDeletedAsync(SelectedVaultUri);
+            DeletedError = "";
+        }
+        catch (Exception ex)
+        {
+            DeletedList = [];
+            DeletedError = ex.Message.Split('\n')[0];
+        }
+    }
+
+    private List<DeletedVaultObject> DeletedList { get; set; } = [];
+    private string DeletedError { get; set; } = "";
+
+    private static string KindLabel(KeyVaultObjectKind kind) => kind switch
+    {
+        KeyVaultObjectKind.Secret => "Secret",
+        KeyVaultObjectKind.Key => T("Key"),
+        _ => T("Certificate"),
+    };
+
+    private async Task RecoverDeletedAsync(DeletedVaultObject item)
+    {
+        if (SelectedVaultUri is null || IsBusy) return;
+
+        IsBusy = true;
+        SetStatus(T("Recovering \"{0}\"...", item.Name), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await DeletedObjects.RecoverAsync(SelectedVaultUri, item.Kind, item.Name);
+            await LoadVaultContentsAsync();
+            SetStatus(T("\"{0}\" recovered.", item.Name), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task PurgeDeletedAsync(DeletedVaultObject item)
+    {
+        if (SelectedVaultUri is null || IsBusy) return;
+
+        IsBusy = true;
+        SetStatus(T("Permanently deleting \"{0}\"...", item.Name), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await DeletedObjects.PurgeAsync(SelectedVaultUri, item.Kind, item.Name);
+            await LoadDeletedAsync();
+            SetStatus(T("\"{0}\" permanently deleted.", item.Name), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private void ClearVaultSelection()
+    {
+        Vaults.Clear();
+        SelectedVaultId = "";
+        SelectedVaultUri = null;
+        SecretList.Clear();
+        KeyList.Clear();
+        CertificateList.Clear();
+        DeletedList = [];
+        DeletedError = "";
+        RevealedSecretName = null;
+        ResetVersions();
+    }
+
+    private async Task CreateVaultAsync()
+    {
+        IsBusy = true;
+        SetStatus(T("Creating vault..."), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await VaultMgmt.CreateVaultAsync(SelectedSubscriptionId, SelectedResourceGroup, NewVaultName, NewVaultLocation);
+            await LoadVaultListAsync();
+            NewVaultName = "";
+            NewVaultLocation = "";
+            SetStatus(T("Vault created."), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task ToggleSecretAsync(string name)
+    {
+        if (RevealedSecretName == name)
+        {
+            RevealedSecretName = null;
+            RevealedSecretValue = null;
+            return;
+        }
+
+        if (SelectedVaultUri is null) return;
+
+        IsBusy = true;
+        StateHasChanged();
+
+        try
+        {
+            RevealedSecretValue = await Secrets.GetSecretValueAsync(SelectedVaultUri, name);
+            RevealedSecretName = name;
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task SaveSecretAsync()
+    {
+        if (SelectedVaultUri is null) return;
+
+        // Updating an existing secret has its own button on the row: creating over an existing name would silently add a version.
+        if (SecretList.Any(x => string.Equals(x.Name, NewSecretName.Trim(), StringComparison.OrdinalIgnoreCase)))
+        {
+            SetStatus(T("Secret {0} already exists: use the \"Update\" button on its row.", NewSecretName.Trim()), error: true);
+            return;
+        }
+
+        IsBusy = true;
+        SetStatus(T("Saving secret..."), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await Secrets.SetSecretValueAsync(SelectedVaultUri, NewSecretName, NewSecretValue);
+            NewSecretName = "";
+            NewSecretValue = "";
+            await LoadVaultContentsAsync();
+            SetStatus(T("Secret saved."), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task CreateKeyAsync()
+    {
+        if (SelectedVaultUri is null) return;
+
+        IsBusy = true;
+        SetStatus(T("Creating key..."), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await Keys.CreateKeyAsync(SelectedVaultUri, NewKeyName, NewKeyType);
+            NewKeyName = "";
+            await LoadVaultContentsAsync();
+            SetStatus(T("Key created."), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task CreateCertificateAsync()
+    {
+        if (SelectedVaultUri is null) return;
+
+        IsBusy = true;
+        SetStatus(T("Creating certificate..."), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await Certificates.CreateSelfSignedCertificateAsync(SelectedVaultUri, NewCertName, NewCertSubject, NewCertValidityMonths);
+            NewCertName = "";
+            NewCertSubject = "";
+            await LoadVaultContentsAsync();
+            SetStatus(T("Certificate created."), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task RenewCertificateAsync(string name)
+    {
+        if (SelectedVaultUri is null) return;
+
+        IsBusy = true;
+        SetStatus(T("Renewing \"{0}\"...", name), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await Certificates.RenewCertificateAsync(SelectedVaultUri, name);
+            await LoadVaultContentsAsync();
+            SetStatus(T("\"{0}\" renewed.", name), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task DeleteCertificateAsync(string name)
+    {
+        if (SelectedVaultUri is null) return;
+
+        // Guards against a double-click firing this twice before the "disabled" attribute
+        // re-renders in the browser: Blazor Server processes UI events one at a time per
+        // circuit, so this in-memory check is enough to make the second click a no-op.
+        if (IsBusy) return;
+        IsBusy = true;
+        SetStatus(T("Deleting \"{0}\"...", name), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await Certificates.DeleteCertificateAsync(SelectedVaultUri, name);
+            await LoadVaultContentsAsync();
+            SetStatus(T("\"{0}\" deleted.", name), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+}

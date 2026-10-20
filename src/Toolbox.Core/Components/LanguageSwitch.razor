@@ -1,0 +1,19 @@
+@using Toolbox.Core.Localization
+@inject NavigationManager Navigation
+
+<select class="form-select form-select-sm" style="width: auto;" title="Language / Lingua" aria-label="Language / Lingua"
+        value="@Tr.Language" @onchange="Change">
+    @foreach (var (lang, name) in Tr.Languages)
+    {
+        <option value="@lang">@name</option>
+    }
+</select>
+
+@code {
+    // The page is reloaded after the change: every text is read again in the new language.
+    private void Change(ChangeEventArgs e)
+    {
+        Tr.SetLanguage(e.Value?.ToString() ?? "en");
+        Navigation.Refresh(forceReload: true);
+    }
+}

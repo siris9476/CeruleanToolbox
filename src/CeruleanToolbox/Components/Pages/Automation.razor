@@ -1,0 +1,401 @@
+@page "/automation"
+@using CeruleanToolbox.Services
+@inject ResourceInventoryService Inventory
+@inject AutomationService AutomationOps
+@inherits CeruleanToolboxPageBase
+
+<PageTitle>Automation</PageTitle>
+
+<h1>Automation Account</h1>
+
+@if (SelectedAccount is null)
+{
+    <p>
+        @T("Lists the Automation Accounts. Click an account name, or double-click its row, to open its overview, the runbooks (with start and parameters) and the job history.")
+    </p>
+
+    <div class="row mb-3">
+        <div class="col-md-6">
+            <label class="form-label">@T("Subscription (optional)")</label>
+            <SearchableSelect TItem="SubscriptionInfo" Items="Subscriptions"
+                               GetLabel="@(s => $"{s.DisplayName} ({s.SubscriptionId})")" GetValue="@(s => s.SubscriptionId)"
+                               SelectedValue="SelectedSubscriptionId" SelectedValueChanged="OnSubscriptionChangedAsync"
+                               Placeholder='@T("-- all --")' Disabled="@(IsLoading || IsBusy)" />
+        </div>
+        <div class="col-md-4">
+            <label class="form-label">@T("Filter by name")</label>
+            <input class="form-control" placeholder='@T("filter...")' @bind="NameFilter" @bind:event="oninput" />
+        </div>
+    </div>
+}
+
+@if (!string.IsNullOrEmpty(StatusMessage))
+{
+    <div class="alert @(IsError ? "alert-danger" : "alert-info")">@StatusMessage</div>
+}
+
+@if (SelectedAccount is null)
+{
+    @if (string.IsNullOrEmpty(SelectedSubscriptionId) && !HasLoadedAllSubscriptions && !IsLoading)
+    {
+        <div class="alert alert-secondary">
+            @T("No subscription selected: pick one for a quick view, or")
+            <button class="btn btn-sm btn-outline-primary" @onclick="LoadAllSubscriptionsAsync">@T("Load all subscriptions")</button>
+            @T("— it may take a while if you have many.")
+        </div>
+    }
+
+    @if (IsLoading)
+    {
+        <div class="d-flex align-items-center gap-2 mb-3">
+            <div class="spinner-border spinner-border-sm text-primary" role="status" aria-hidden="true"></div>
+            <span>@T("Loading...")</span>
+        </div>
+    }
+
+    @if (!IsLoading && (!string.IsNullOrEmpty(SelectedSubscriptionId) || HasLoadedAllSubscriptions))
+    {
+        @if (!FilteredAccounts.Any())
+        {
+            <p><em>@T("No Automation Accounts found.")</em></p>
+        }
+        else
+        {
+            <table class="table table-sm table-hover align-middle">
+                <thead>
+                    <tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>Location</th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var account in FilteredAccounts)
+                    {
+                        <tr style="cursor: pointer;" title='@T("Double-click to open the account")' @ondblclick="() => OpenAccountAsync(account)">
+                            <td>
+                                <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenAccountAsync(account)">
+                                    @account.Name <span aria-hidden="true">&rsaquo;</span>
+                                </button>
+                            </td>
+                            <td>@GetSubscriptionName(account.Id)</td>
+                            <td>@account.ResourceGroup</td>
+                            <td>@account.Location</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+    }
+}
+else
+{
+    <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
+        <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" @onclick="CloseAccount">&larr; Automation Account</button>
+        <h4 class="mb-0">@SelectedAccount.Name</h4>
+        @if (Overview is not null)
+        {
+            <span class="badge bg-secondary">@Overview.Status</span>
+        }
+        <button class="btn btn-sm btn-outline-secondary ms-auto" disabled="@IsBusy" @onclick="RefreshAccountAsync">@T("Refresh")</button>
+    </div>
+    <p class="text-muted small">
+        @GetSubscriptionName(SelectedAccount.Id) · Resource group @SelectedAccount.ResourceGroup · @SelectedAccount.Location
+    </p>
+
+    <ul class="nav nav-tabs mb-3">
+        <li class="nav-item"><button class="nav-link @(ActiveTab == "overview" ? "active" : "")" @onclick='() => ActiveTab = "overview"'>@T("Overview")</button></li>
+        <li class="nav-item"><button class="nav-link @(ActiveTab == "runbooks" ? "active" : "")" @onclick='() => ActiveTab = "runbooks"'>@T("Runbooks ({0})", Runbooks.Count)</button></li>
+        <li class="nav-item"><button class="nav-link @(ActiveTab == "jobs" ? "active" : "")" @onclick='() => ActiveTab = "jobs"'>@T("Recent jobs ({0})", Jobs.Count)</button></li>
+    </ul>
+
+    @if (ActiveTab == "overview" && Overview is not null)
+    {
+        <ResourceOverviewView Overview="Overview" />
+    }
+    else if (ActiveTab == "runbooks")
+    {
+            <div class="mb-3">
+                <label class="form-label">@T("Start parameters (optional, one key=value pair per line)")</label>
+                <textarea class="form-control" rows="3" @bind="ParametersText" placeholder='@T("ParameterName=value")'></textarea>
+            </div>
+
+            @if (Runbooks.Count == 0)
+            {
+                <p><em>@T("No runbooks found in this account.")</em></p>
+            }
+            else
+            {
+                <table class="table table-sm">
+                    <thead><tr><th>@T("Name")</th><th>@T("Type")</th><th>@T("Status")</th><th>@T("# Jobs")</th><th></th></tr></thead>
+                    <tbody>
+                        @foreach (var runbook in Runbooks)
+                        {
+                            <tr>
+                                <td>@runbook.Name</td>
+                                <td>@runbook.RunbookType</td>
+                                <td>@runbook.State</td>
+                                <td>@(runbook.JobCount?.ToString() ?? "-")</td>
+                                <td>
+                                    <button class="btn btn-sm btn-primary" disabled="@IsBusy" @onclick="() => StartRunbookAsync(runbook.Name)">
+                                        @(IsBusy ? T("Starting...") : T("Start"))
+                                    </button>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+
+    }
+    else if (ActiveTab == "jobs")
+    {
+            <h6>
+                @T("Recent jobs")
+                <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" @onclick="RefreshJobsAsync">@T("Refresh")</button>
+            </h6>
+            @if (Jobs.Count == 0)
+            {
+                <p><em>@T("No jobs found.")</em></p>
+            }
+            else
+            {
+                <table class="table table-sm">
+                    <thead><tr><th>Runbook</th><th>@T("Status")</th><th>@T("Created")</th><th>@T("Started")</th><th>@T("Finished")</th></tr></thead>
+                    <tbody>
+                        @foreach (var job in Jobs)
+                        {
+                            <tr>
+                                <td>@job.RunbookName</td>
+                                <td>@job.Status</td>
+                                <td>@(job.CreatedOn?.LocalDateTime.ToString("g") ?? "-")</td>
+                                <td>@(job.StartOn?.LocalDateTime.ToString("g") ?? "-")</td>
+                                <td>@(job.EndOn?.LocalDateTime.ToString("g") ?? "-")</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+    }
+}
+
+@code {
+    private List<AutomationAccountInfo> Accounts { get; set; } = new();
+    private List<AutomationRunbookInfo> Runbooks { get; set; } = new();
+    private List<AutomationJobInfo> Jobs { get; set; } = new();
+
+    private string SelectedSubscriptionId { get; set; } = "";
+    private string SelectedAccountId { get; set; } = "";
+    private string NameFilter { get; set; } = "";
+    private ResourceOverview? Overview { get; set; }
+    private string ActiveTab { get; set; } = "overview";
+    private AutomationAccountInfo? SelectedAccount => Accounts.FirstOrDefault(a => a.Id == SelectedAccountId);
+
+    private IEnumerable<AutomationAccountInfo> FilteredAccounts => Accounts.Where(a =>
+        string.IsNullOrWhiteSpace(NameFilter) || a.Name.Contains(NameFilter, StringComparison.OrdinalIgnoreCase));
+    private string ParametersText { get; set; } = "";
+
+    private bool IsLoadingDetail { get; set; }
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            Subscriptions = await Inventory.ListSubscriptionsAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+
+        await AutoOpenAsync();
+    }
+
+    private async Task AutoOpenAsync()
+    {
+        var id = RequestedResourceId;
+        if (id is null || Subscriptions.Count == 0) return;
+
+        await OnSubscriptionChangedAsync(RequestedSubscriptionId ?? "");
+        var item = Accounts.FirstOrDefault(x => string.Equals(x.Id, id, StringComparison.OrdinalIgnoreCase));
+        if (item is not null)
+        {
+            await OpenAccountAsync(item);
+        }
+    }
+
+    private async Task OnSubscriptionChangedAsync(string subscriptionId)
+    {
+        SelectedSubscriptionId = subscriptionId;
+        Accounts.Clear();
+        ClearSelectedAccount();
+        HasLoadedAllSubscriptions = false;
+
+        // Clearing back to "all" doesn't auto-load: fetching every subscription is expensive,
+        // so it waits for the explicit button below instead of firing on every selection change.
+        if (string.IsNullOrEmpty(SelectedSubscriptionId)) return;
+
+        IsLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            Accounts = await AutomationOps.ListAllAsync(SelectedSubscriptionId);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private async Task LoadAllSubscriptionsAsync()
+    {
+        HasLoadedAllSubscriptions = true;
+        IsLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            var accounts = new List<AutomationAccountInfo>();
+            foreach (var sub in Subscriptions)
+            {
+                accounts.AddRange(await AutomationOps.ListAllAsync(sub.SubscriptionId));
+            }
+
+            Accounts = accounts;
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private void ClearSelectedAccount()
+    {
+        SelectedAccountId = "";
+        Runbooks.Clear();
+        Jobs.Clear();
+        ParametersText = "";
+    }
+
+    private async Task OpenAccountAsync(AutomationAccountInfo account)
+    {
+        if (IsBusy) return;
+
+        IsBusy = true;
+        SetStatus(T("Opening {0}...", account.Name), error: false);
+        StateHasChanged();
+
+        try
+        {
+            Overview = await AutomationOps.GetOverviewAsync(account.Id);
+            SelectedAccountId = account.Id;
+            ActiveTab = "overview";
+            ParametersText = "";
+            Runbooks = await AutomationOps.ListRunbooksAsync(account.Id);
+            Jobs = await AutomationOps.ListRecentJobsAsync(account.Id);
+            SetStatus("", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private void CloseAccount()
+    {
+        ClearSelectedAccount();
+        Overview = null;
+        SetStatus("", error: false);
+    }
+
+    private async Task RefreshAccountAsync()
+    {
+        if (IsBusy || SelectedAccount is null) return;
+
+        IsBusy = true;
+        StateHasChanged();
+
+        try
+        {
+            Overview = await AutomationOps.GetOverviewAsync(SelectedAccount.Id);
+            Runbooks = await AutomationOps.ListRunbooksAsync(SelectedAccount.Id);
+            Jobs = await AutomationOps.ListRecentJobsAsync(SelectedAccount.Id);
+            SetStatus("", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task RefreshJobsAsync()
+    {
+        IsBusy = true;
+        StateHasChanged();
+
+        try
+        {
+            Jobs = await AutomationOps.ListRecentJobsAsync(SelectedAccountId);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task StartRunbookAsync(string runbookName)
+    {
+        IsBusy = true;
+        SetStatus(T("Starting \"{0}\"...", runbookName), error: false);
+        StateHasChanged();
+
+        try
+        {
+            var parameters = ParseParameters(ParametersText);
+            await AutomationOps.StartRunbookAsync(SelectedAccountId, runbookName, parameters);
+            SetStatus(T("Job for \"{0}\" started.", runbookName), error: false);
+            Jobs = await AutomationOps.ListRecentJobsAsync(SelectedAccountId);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private static Dictionary<string, string> ParseParameters(string text)
+    {
+        var result = new Dictionary<string, string>();
+        foreach (var line in text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var separatorIndex = line.IndexOf('=');
+            if (separatorIndex <= 0) continue;
+
+            var key = line[..separatorIndex].Trim();
+            var value = line[(separatorIndex + 1)..].Trim();
+            result[key] = value;
+        }
+
+        return result;
+    }
+}

@@ -1,0 +1,985 @@
+@page "/networking"
+@using CeruleanToolbox.Services
+@inject ResourceInventoryService Inventory
+@inject NetworkingService NetworkingOps
+@inherits CeruleanToolboxPageBase
+
+<PageTitle>Networking</PageTitle>
+
+<h1>Networking</h1>
+<p>
+    @T("Mostly read-only view of the network resources: Virtual Network, NSG, Public IP, Load Balancer, Private Endpoint, Network Interface, Private DNS Zone, Traffic Manager, Network Watcher, WAF Policy and CDN.")
+    @T("NSG rules are the exception: they can be created, edited and deleted directly from here.")
+    @T("For every listed resource, click the name (or double-click the row) to open the overview as in the Azure portal.")
+</p>
+
+<div class="row mb-3">
+    <div class="col-md-6">
+        <label class="form-label">@T("Subscription (optional)")</label>
+        <SearchableSelect TItem="SubscriptionInfo" Items="Subscriptions"
+                           GetLabel="@(s => $"{s.DisplayName} ({s.SubscriptionId})")" GetValue="@(s => s.SubscriptionId)"
+                           SelectedValue="SelectedSubscriptionId" SelectedValueChanged="OnSubscriptionChangedAsync"
+                           Placeholder='@T("-- all --")' Disabled="@IsLoading" />
+    </div>
+</div>
+
+@if (!string.IsNullOrEmpty(StatusMessage))
+{
+    <div class="alert @(IsError ? "alert-danger" : "alert-info")">@StatusMessage</div>
+}
+
+@if (string.IsNullOrEmpty(SelectedSubscriptionId) && !HasLoadedAllSubscriptions)
+{
+    <div class="alert alert-secondary">
+        @T("No subscription selected: choose one, or")
+        <button class="btn btn-sm btn-outline-primary" @onclick="() => OnSubscriptionChangedAsync(SelectedSubscriptionId)">@T("Load all subscriptions")</button>
+        @T("— it may take a while if you have many.")
+    </div>
+}
+else
+{
+    <ul class="nav nav-tabs mb-3">
+        @foreach (var tab in Tabs)
+        {
+            <li class="nav-item">
+                <button class="nav-link @(ActiveTab == tab ? "active" : "")" @onclick="() => SelectTabAsync(tab)">@tab</button>
+            </li>
+        }
+    </ul>
+
+    @if (IsLoading)
+    {
+        <div class="d-flex align-items-center gap-2 mb-3">
+            <div class="spinner-border spinner-border-sm text-primary" role="status" aria-hidden="true"></div>
+            <span>@T("Loading...")</span>
+        </div>
+    }
+    else
+    {
+        @if (DetailId is not null)
+        {
+            <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
+                <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" @onclick="CloseDetail">&larr; @ActiveTab</button>
+                <h4 class="mb-0">@DetailName</h4>
+                @if (DetailOverview is not null)
+                {
+                    <span class="badge bg-secondary">@DetailOverview.Status</span>
+                }
+                <button class="btn btn-sm btn-outline-secondary ms-auto" disabled="@IsBusy" @onclick="RefreshDetailAsync">@T("Refresh")</button>
+            </div>
+            <p class="text-muted small">@GetSubscriptionName(DetailId) · Resource group @ResourceGroupOf(DetailId)</p>
+
+            @if (ActiveTab == "NSG")
+            {
+                <ul class="nav nav-tabs mb-3">
+                    <li class="nav-item"><button class="nav-link @(DetailTab == "overview" ? "active" : "")" @onclick='() => DetailTab = "overview"'>@T("Overview")</button></li>
+                    <li class="nav-item"><button class="nav-link @(DetailTab == "rules" ? "active" : "")" @onclick='() => DetailTab = "rules"'>@T("Security rules ({0})", NsgRules.Count)</button></li>
+                </ul>
+            }
+            @if (DetailTab == "rules")
+            {
+                        @if (NsgRules.Count == 0)
+                        {
+                            <p><em>@T("No rules.")</em></p>
+                        }
+                        else
+                        {
+                            <table class="table table-sm">
+                                <thead><tr><th>@T("Name")</th><th>@T("Priority")</th><th>@T("Direction")</th><th>@T("Access")</th><th>@T("Protocol")</th><th>@T("Source")</th><th>@T("Destination")</th><th>Default</th><th></th></tr></thead>
+                                <tbody>
+                                    @foreach (var rule in NsgRules)
+                                    {
+                                        <tr class="@(rule.IsDefault ? "text-muted" : "")" @key="rule.Name">
+                                            <td>@rule.Name</td>
+                                            <td>@rule.Priority</td>
+                                            <td>@rule.Direction</td>
+                                            <td>@rule.Access</td>
+                                            <td>@rule.Protocol</td>
+                                            <td>@rule.SourcePrefix:@rule.SourcePort</td>
+                                            <td>@rule.DestinationPrefix:@rule.DestinationPort</td>
+                                            <td>@(rule.IsDefault ? T("Yes") : T("No"))</td>
+                                            <td>
+                                                @if (!rule.IsDefault)
+                                                {
+                                                    <button class="btn btn-sm btn-outline-secondary" disabled="@IsRuleBusy" @onclick="() => EditRule(rule)">@T("Edit")</button>
+                                                    <ConfirmDeleteButton ConfirmText="@rule.Name" IsBusy="IsRuleBusy" OnConfirmed="() => DeleteRuleAsync(DetailId, rule.Name)" />
+                                                }
+                                            </td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        }
+
+                        <h5 class="mt-3">@(EditingRuleName is null ? T("New rule") : T("Edit rule {0}", EditingRuleName))</h5>
+                        @if (!string.IsNullOrEmpty(RuleFormMessage))
+                        {
+                            <div class="alert alert-danger">@RuleFormMessage</div>
+                        }
+                        <div class="row g-2 mb-2">
+                            <div class="col-md-2">
+                                <input class="form-control form-control-sm" placeholder='@T("Name")' @bind="RuleName" disabled="@(EditingRuleName is not null)" />
+                            </div>
+                            <div class="col-md-1">
+                                <input type="number" class="form-control form-control-sm" placeholder='@T("Priority")' @bind="RulePriority" />
+                            </div>
+                            <div class="col-md-1">
+                                <select class="form-select form-select-sm" @bind="RuleDirection">
+                                    <option value="Inbound">Inbound</option>
+                                    <option value="Outbound">Outbound</option>
+                                </select>
+                            </div>
+                            <div class="col-md-1">
+                                <select class="form-select form-select-sm" @bind="RuleAccess">
+                                    <option value="Allow">Allow</option>
+                                    <option value="Deny">Deny</option>
+                                </select>
+                            </div>
+                            <div class="col-md-1">
+                                <select class="form-select form-select-sm" @bind="RuleProtocol">
+                                    <option value="Tcp">Tcp</option>
+                                    <option value="Udp">Udp</option>
+                                    <option value="Icmp">Icmp</option>
+                                    <option value="*">*</option>
+                                </select>
+                            </div>
+                            <div class="col-md-2">
+                                <input class="form-control form-control-sm" placeholder='@T("Source prefix")' @bind="RuleSourcePrefix" />
+                            </div>
+                            <div class="col-md-1">
+                                <input class="form-control form-control-sm" placeholder='@T("Source port")' @bind="RuleSourcePort" />
+                            </div>
+                            <div class="col-md-2">
+                                <input class="form-control form-control-sm" placeholder='@T("Destination prefix")' @bind="RuleDestinationPrefix" />
+                            </div>
+                            <div class="col-md-1">
+                                <input class="form-control form-control-sm" placeholder='@T("Destination port")' @bind="RuleDestinationPort" />
+                            </div>
+                        </div>
+                        <button class="btn btn-sm btn-primary" disabled="@(string.IsNullOrWhiteSpace(RuleName) || IsRuleBusy)" @onclick="() => SaveRuleAsync(DetailId)">
+                            @(IsRuleBusy ? T("Saving...") : T("Save rule"))
+                        </button>
+                        @if (EditingRuleName is not null)
+                        {
+                            <button class="btn btn-sm btn-outline-secondary" disabled="@IsRuleBusy" @onclick="ResetRuleForm">@T("Cancel edit")</button>
+                        }
+            }
+            else if (DetailOverview is not null)
+            {
+                <ResourceOverviewView Overview="DetailOverview" ActionTableTitle="@(ActiveTab == "CDN" ? "Endpoint" : null)">
+                    <RowActions Context="row">
+                        <button class="btn btn-sm btn-outline-secondary py-0" disabled="@IsBusy"
+                                @onclick="() => StartPurge(DetailId!, CdnEndpointOf(row))">Purge cache</button>
+                    </RowActions>
+                    <RowDetail Context="row">
+                        @if (PurgeProfileId == DetailId && PurgeEndpoint?.Name == row[0])
+                        {
+                            <tr>
+                                <td colspan="6" class="bg-light">
+                                    <div class="fw-semibold mb-1">@T("Purge cache of {0}", row[0])</div>
+                                    <textarea class="form-control form-control-sm mb-2" rows="3" style="max-width: 36rem;" @bind="PurgePathsText"
+                                              placeholder='@T("One path per line, for example /* or /images/*")'></textarea>
+                                    <div class="form-text mb-2">
+                                        @T("Paths start with") <code>/</code> @T("and may end with") <code>*</code> (<code>/*</code> @T("empties the whole endpoint, including all domains).")
+                                        @T("All cached copies will be discarded and later requests will go to the origin: on a high-traffic site this can increase the load for a few minutes.")
+                                        @T("Azure accepts the request immediately, but the purge takes a few minutes.")
+                                    </div>
+                                    <ConfirmDeleteButton ConfirmText="@row[0]" IsBusy="IsBusy" ButtonLabel='@T("Run purge")'
+                                                         ConfirmLabel='@T("Confirm purge")' OnConfirmed="() => PurgeCdnAsync(DetailId!, CdnEndpointOf(row))" />
+                                    <button class="btn btn-sm btn-outline-secondary ms-2" disabled="@IsBusy" @onclick="CancelPurge">@T("Close")</button>
+                                </td>
+                            </tr>
+                        }
+                    </RowDetail>
+                </ResourceOverviewView>
+            }
+        }
+        else if (ActiveTab == "Virtual Network")
+        {
+            @if (VNets.Count == 0)
+            {
+                <p><em>@T("No VNets found.")</em></p>
+            }
+            else
+            {
+                <table class="table table-sm">
+                    <thead><tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>Address Space</th><th>Subnet</th></tr></thead>
+                    <tbody>
+                        @foreach (var vnet in VNets)
+                        {
+                            <tr style="cursor: pointer;" title='@T("Double-click to open the virtual network")' @ondblclick="() => OpenDetailAsync(vnet.Id, vnet.Name)">
+                                <td>
+                                    <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenDetailAsync(vnet.Id, vnet.Name)">
+                                        @vnet.Name <span aria-hidden="true">&rsaquo;</span>
+                                    </button>
+                                </td>
+                                <td>@GetSubscriptionName(vnet.Id)</td>
+                                <td>@vnet.ResourceGroup</td>
+                                <td>@string.Join(", ", vnet.AddressSpace)</td>
+                                <td>
+                                    @foreach (var subnet in vnet.Subnets)
+                                    {
+                                        <div>@subnet.Name (@subnet.AddressPrefix)@(subnet.NsgName is not null ? $" — NSG: {subnet.NsgName}" : "")</div>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        }
+        else if (ActiveTab == "NSG")
+        {
+            @if (Nsgs.Count == 0)
+            {
+                <p><em>@T("No NSGs found.")</em></p>
+            }
+            else
+            {
+                <table class="table table-sm">
+                    <thead><tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>@T("# Rules")</th><th># Subnet</th><th># NIC</th></tr></thead>
+                    <tbody>
+                        @foreach (var nsg in Nsgs)
+                        {
+                            <tr style="cursor: pointer;" title='@T("Double-click to open the NSG")' @ondblclick="() => OpenDetailAsync(nsg.Id, nsg.Name)">
+                                <td>
+                                    <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenDetailAsync(nsg.Id, nsg.Name)">
+                                        @nsg.Name <span aria-hidden="true">&rsaquo;</span>
+                                    </button>
+                                </td>
+                                <td>@GetSubscriptionName(nsg.Id)</td>
+                                <td>@nsg.ResourceGroup</td>
+                                <td>@nsg.RuleCount</td>
+                                <td>@nsg.AssociatedSubnets</td>
+                                <td>@nsg.AssociatedNics</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        }
+        else if (ActiveTab == "Public IP")
+        {
+            @if (PublicIps.Count == 0)
+            {
+                <p><em>@T("No public IPs found.")</em></p>
+            }
+            else
+            {
+                <table class="table table-sm">
+                    <thead><tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>@T("Address")</th><th>@T("Allocation")</th><th>@T("Associated to")</th></tr></thead>
+                    <tbody>
+                        @foreach (var ip in PublicIps)
+                        {
+                            <tr style="cursor: pointer;" title='@T("Double-click to open the IP address")' @ondblclick="() => OpenDetailAsync(ip.Id, ip.Name)">
+                                <td>
+                                    <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenDetailAsync(ip.Id, ip.Name)">
+                                        @ip.Name <span aria-hidden="true">&rsaquo;</span>
+                                    </button>
+                                </td>
+                                <td>@GetSubscriptionName(ip.Id)</td>
+                                <td>@ip.ResourceGroup</td>
+                                <td>@(ip.IpAddress ?? "-")</td>
+                                <td>@ip.AllocationMethod</td>
+                                <td>@(ip.AssociatedResource ?? "-")</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        }
+        else if (ActiveTab == "Load Balancer")
+        {
+            @if (LoadBalancers.Count == 0)
+            {
+                <p><em>@T("No load balancers found.")</em></p>
+            }
+            else
+            {
+                <table class="table table-sm">
+                    <thead><tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>SKU</th><th>Frontend IP</th><th>@T("# Backend pools")</th><th>@T("# Rules")</th></tr></thead>
+                    <tbody>
+                        @foreach (var lb in LoadBalancers)
+                        {
+                            <tr style="cursor: pointer;" title='@T("Double-click to open the load balancer")' @ondblclick="() => OpenDetailAsync(lb.Id, lb.Name)">
+                                <td>
+                                    <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenDetailAsync(lb.Id, lb.Name)">
+                                        @lb.Name <span aria-hidden="true">&rsaquo;</span>
+                                    </button>
+                                </td>
+                                <td>@GetSubscriptionName(lb.Id)</td>
+                                <td>@lb.ResourceGroup</td>
+                                <td>@lb.Sku</td>
+                                <td>@string.Join(", ", lb.FrontendIps)</td>
+                                <td>@lb.BackendPoolCount</td>
+                                <td>@lb.RuleCount</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        }
+        else if (ActiveTab == "Private Endpoint")
+        {
+            @if (PrivateEndpoints.Count == 0)
+            {
+                <p><em>@T("No private endpoints found.")</em></p>
+            }
+            else
+            {
+                <table class="table table-sm">
+                    <thead><tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>VNet</th><th>Subnet</th></tr></thead>
+                    <tbody>
+                        @foreach (var pe in PrivateEndpoints)
+                        {
+                            <tr style="cursor: pointer;" title='@T("Double-click to open the private endpoint")' @ondblclick="() => OpenDetailAsync(pe.Id, pe.Name)">
+                                <td>
+                                    <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenDetailAsync(pe.Id, pe.Name)">
+                                        @pe.Name <span aria-hidden="true">&rsaquo;</span>
+                                    </button>
+                                </td>
+                                <td>@GetSubscriptionName(pe.Id)</td>
+                                <td>@pe.ResourceGroup</td>
+                                <td>@(pe.VNetName ?? "-")</td>
+                                <td>@(pe.SubnetName ?? "-")</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        }
+        else if (ActiveTab == "Network Interface")
+        {
+            @if (NetworkInterfaces.Count == 0)
+            {
+                <p><em>@T("No network interfaces found.")</em></p>
+            }
+            else
+            {
+                <table class="table table-sm">
+                    <thead><tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>@T("Private IP")</th><th>Public IP</th><th>@T("Attached to")</th></tr></thead>
+                    <tbody>
+                        @foreach (var nic in NetworkInterfaces)
+                        {
+                            <tr style="cursor: pointer;" title='@T("Double-click to open the network interface")' @ondblclick="() => OpenDetailAsync(nic.Id, nic.Name)">
+                                <td>
+                                    <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenDetailAsync(nic.Id, nic.Name)">
+                                        @nic.Name <span aria-hidden="true">&rsaquo;</span>
+                                    </button>
+                                </td>
+                                <td>@GetSubscriptionName(nic.Id)</td>
+                                <td>@nic.ResourceGroup</td>
+                                <td>@(nic.PrivateIp ?? "-")</td>
+                                <td>@(nic.PublicIpName ?? "-")</td>
+                                <td>@(nic.AttachedTo ?? "-")</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        }
+        else if (ActiveTab == "Private DNS Zone")
+        {
+            @if (PrivateDnsZones.Count == 0)
+            {
+                <p><em>@T("No private DNS zones found.")</em></p>
+            }
+            else
+            {
+                <table class="table table-sm">
+                    <thead><tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>@T("# Records")</th><th>@T("Linked VNets")</th></tr></thead>
+                    <tbody>
+                        @foreach (var zone in PrivateDnsZones)
+                        {
+                            <tr style="cursor: pointer;" title='@T("Double-click to open the DNS zone")' @ondblclick="() => OpenDetailAsync(zone.Id, zone.Name)">
+                                <td>
+                                    <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenDetailAsync(zone.Id, zone.Name)">
+                                        @zone.Name <span aria-hidden="true">&rsaquo;</span>
+                                    </button>
+                                </td>
+                                <td>@GetSubscriptionName(zone.Id)</td>
+                                <td>@zone.ResourceGroup</td>
+                                <td>@zone.RecordCount</td>
+                                <td>
+                                    @if (zone.VirtualNetworkLinks.Count == 0)
+                                    {
+                                        <span>-</span>
+                                    }
+                                    else
+                                    {
+                                        @foreach (var link in zone.VirtualNetworkLinks)
+                                        {
+                                            <div>@link.Name → @(link.VNetName ?? "-")@(link.RegistrationEnabled ? T(" (automatic registration)") : "")</div>
+                                        }
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        }
+        else if (ActiveTab == "Traffic Manager")
+        {
+            @if (TrafficManagerProfiles.Count == 0)
+            {
+                <p><em>@T("No Traffic Manager profiles found.")</em></p>
+            }
+            else
+            {
+                <table class="table table-sm">
+                    <thead><tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>@T("Status")</th><th>@T("Routing method")</th><th># Endpoint</th></tr></thead>
+                    <tbody>
+                        @foreach (var profile in TrafficManagerProfiles)
+                        {
+                            <tr style="cursor: pointer;" title='@T("Double-click to open the Traffic Manager profile")' @ondblclick="() => OpenDetailAsync(profile.Id, profile.Name)">
+                                <td>
+                                    <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenDetailAsync(profile.Id, profile.Name)">
+                                        @profile.Name <span aria-hidden="true">&rsaquo;</span>
+                                    </button>
+                                </td>
+                                <td>@GetSubscriptionName(profile.Id)</td>
+                                <td>@profile.ResourceGroup</td>
+                                <td>@(profile.Status ?? "-")</td>
+                                <td>@(profile.RoutingMethod ?? "-")</td>
+                                <td>@profile.EndpointCount</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        }
+        else if (ActiveTab == "Network Watcher")
+        {
+            @if (NetworkWatchers.Count == 0)
+            {
+                <p><em>@T("No Network Watchers found.")</em></p>
+            }
+            else
+            {
+                <table class="table table-sm">
+                    <thead><tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>Location</th></tr></thead>
+                    <tbody>
+                        @foreach (var watcher in NetworkWatchers)
+                        {
+                            <tr style="cursor: pointer;" title='@T("Double-click to open the Network Watcher")' @ondblclick="() => OpenDetailAsync(watcher.Id, watcher.Name)">
+                                <td>
+                                    <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenDetailAsync(watcher.Id, watcher.Name)">
+                                        @watcher.Name <span aria-hidden="true">&rsaquo;</span>
+                                    </button>
+                                </td>
+                                <td>@GetSubscriptionName(watcher.Id)</td>
+                                <td>@watcher.ResourceGroup</td>
+                                <td>@watcher.Location</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        }
+        else if (ActiveTab == "WAF Policy")
+        {
+            @if (WafPolicies.Count == 0)
+            {
+                <p><em>@T("No WAF policies found.")</em></p>
+            }
+            else
+            {
+                <table class="table table-sm">
+                    <thead><tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>@T("Mode")</th><th>@T("# Custom rules")</th></tr></thead>
+                    <tbody>
+                        @foreach (var policy in WafPolicies)
+                        {
+                            <tr style="cursor: pointer;" title='@T("Double-click to open the WAF policy")' @ondblclick="() => OpenDetailAsync(policy.Id, policy.Name)">
+                                <td>
+                                    <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenDetailAsync(policy.Id, policy.Name)">
+                                        @policy.Name <span aria-hidden="true">&rsaquo;</span>
+                                    </button>
+                                </td>
+                                <td>@GetSubscriptionName(policy.Id)</td>
+                                <td>@policy.ResourceGroup</td>
+                                <td>@(policy.Mode ?? "-")</td>
+                                <td>@policy.CustomRuleCount</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        }
+        else if (ActiveTab == "CDN")
+        {
+            @if (CdnProfiles.Count == 0)
+            {
+                <p><em>@T("No CDN profiles found.")</em></p>
+            }
+            else
+            {
+                <table class="table table-sm">
+                    <thead><tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>SKU</th><th>Endpoint</th></tr></thead>
+                    <tbody>
+                        @foreach (var profile in CdnProfiles)
+                        {
+                            <tr style="cursor: pointer;" title='@T("Double-click to open the CDN profile")' @ondblclick="() => OpenDetailAsync(profile.Id, profile.Name)">
+                                <td>
+                                    <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenDetailAsync(profile.Id, profile.Name)">
+                                        @profile.Name <span aria-hidden="true">&rsaquo;</span>
+                                    </button>
+                                </td>
+                                <td>@GetSubscriptionName(profile.Id)</td>
+                                <td>@profile.ResourceGroup</td>
+                                <td>@profile.Sku</td>
+                                <td>
+                                    @if (profile.Endpoints.Count == 0)
+                                    {
+                                        <span>-</span>
+                                    }
+                                    else
+                                    {
+                                        @foreach (var ep in profile.Endpoints)
+                                        {
+                                            <div>@ep.Name (@ep.HostName)@(ep.IsFrontDoor ? " — Front Door" : "")</div>
+                                        }
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        }
+    }
+}
+
+@code {
+    private static readonly string[] Tabs = {
+        "Virtual Network", "NSG", "Public IP", "Load Balancer", "Private Endpoint",
+        "Network Interface", "Private DNS Zone", "Traffic Manager", "Network Watcher", "WAF Policy", "CDN"
+    };
+
+    private List<VNetInfo> VNets { get; set; } = new();
+    private List<NsgInfo> Nsgs { get; set; } = new();
+    private List<PublicIpInfo> PublicIps { get; set; } = new();
+    private List<LoadBalancerInfo> LoadBalancers { get; set; } = new();
+    private List<PrivateEndpointInfo> PrivateEndpoints { get; set; } = new();
+    private List<NsgRuleInfo> NsgRules { get; set; } = new();
+    private List<NetworkInterfaceInfo> NetworkInterfaces { get; set; } = new();
+    private List<PrivateDnsZoneInfo> PrivateDnsZones { get; set; } = new();
+    private List<TrafficManagerProfileInfo> TrafficManagerProfiles { get; set; } = new();
+    private List<NetworkWatcherInfo> NetworkWatchers { get; set; } = new();
+    private List<WafPolicyInfo> WafPolicies { get; set; } = new();
+    private List<CdnProfileInfo> CdnProfiles { get; set; } = new();
+
+    // A row of the overview's "Endpoint" table is [name, kind, host, state, provisioning].
+    private static CdnEndpointInfo CdnEndpointOf(IReadOnlyList<string> row) => new(row[0], row[2], row[1] == "Front Door");
+
+    // Cache purge of one CDN / Front Door endpoint, opened from the "Purge cache" button of its row in the profile's "Endpoint" table.
+    private string? PurgeProfileId { get; set; }
+    private CdnEndpointInfo? PurgeEndpoint { get; set; }
+    private string PurgePathsText { get; set; } = "/*";
+
+    private void StartPurge(string profileId, CdnEndpointInfo endpoint)
+    {
+        PurgeProfileId = profileId;
+        PurgeEndpoint = endpoint;
+        PurgePathsText = "/*";
+    }
+
+    private void CancelPurge()
+    {
+        PurgeProfileId = null;
+        PurgeEndpoint = null;
+    }
+
+    private async Task PurgeCdnAsync(string profileId, CdnEndpointInfo endpoint)
+    {
+        if (IsBusy) return;
+
+        IsBusy = true;
+        SetStatus(T("Purge request for {0} in progress...", endpoint.Name), error: false);
+        StateHasChanged();
+
+        try
+        {
+            var paths = PurgePathsText.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            await NetworkingOps.PurgeCdnEndpointAsync(profileId, endpoint.Name, endpoint.IsFrontDoor, paths);
+            SetStatus(T("Purge requested for {0} ({1}): Azure accepted it, the purge takes a few minutes.", endpoint.Name, string.Join(", ", paths)), error: false);
+            CancelPurge();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private string SelectedSubscriptionId { get; set; } = "";
+    private string ActiveTab { get; set; } = Tabs[0];
+    private string? DetailId { get; set; }
+    private string DetailName { get; set; } = "";
+    private string DetailTab { get; set; } = "overview";
+    private ResourceOverview? DetailOverview { get; set; }
+    private readonly HashSet<string> _loadedTabsPerScope = new();
+
+    private string? EditingRuleName { get; set; }
+    private string RuleName { get; set; } = "";
+    private int RulePriority { get; set; } = 100;
+    private string RuleDirection { get; set; } = "Inbound";
+    private string RuleAccess { get; set; } = "Allow";
+    private string RuleProtocol { get; set; } = "Tcp";
+    private string RuleSourcePrefix { get; set; } = "*";
+    private string RuleSourcePort { get; set; } = "*";
+    private string RuleDestinationPrefix { get; set; } = "*";
+    private string RuleDestinationPort { get; set; } = "*";
+    private string RuleFormMessage { get; set; } = "";
+    private bool IsRuleBusy { get; set; }
+
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            Subscriptions = await Inventory.ListSubscriptionsAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+
+        await AutoOpenAsync();
+    }
+
+    private static readonly Dictionary<string, string> TypeTabs = new()
+    {
+        ["microsoft.network/virtualnetworks"] = "Virtual Network",
+        ["microsoft.network/networksecuritygroups"] = "NSG",
+        ["microsoft.network/publicipaddresses"] = "Public IP",
+        ["microsoft.network/loadbalancers"] = "Load Balancer",
+        ["microsoft.network/privateendpoints"] = "Private Endpoint",
+        ["microsoft.network/networkinterfaces"] = "Network Interface",
+        ["microsoft.network/privatednszones"] = "Private DNS Zone",
+        ["microsoft.network/trafficmanagerprofiles"] = "Traffic Manager",
+        ["microsoft.network/networkwatchers"] = "Network Watcher",
+        ["microsoft.network/applicationgatewaywebapplicationfirewallpolicies"] = "WAF Policy",
+        ["microsoft.cdn/profiles"] = "CDN",
+    };
+
+    private async Task AutoOpenAsync()
+    {
+        var id = RequestedResourceId;
+        if (id is null || Subscriptions.Count == 0) return;
+        if (!TypeTabs.TryGetValue(RequestedResourceType ?? "", out var tab)) return;
+
+        ActiveTab = tab;
+        await OnSubscriptionChangedAsync(RequestedSubscriptionId ?? "");
+        await OpenDetailAsync(id, RequestedResourceName ?? id);
+    }
+
+    private async Task OnSubscriptionChangedAsync(string subscriptionId)
+    {
+        SelectedSubscriptionId = subscriptionId;
+        HasLoadedAllSubscriptions = string.IsNullOrEmpty(subscriptionId);
+        ClearAll();
+        _loadedTabsPerScope.Clear();
+        CloseDetail();
+
+        await LoadActiveTabAsync();
+    }
+
+    private void ClearAll()
+    {
+        VNets.Clear();
+        Nsgs.Clear();
+        PublicIps.Clear();
+        LoadBalancers.Clear();
+        PrivateEndpoints.Clear();
+        NsgRules.Clear();
+        NetworkInterfaces.Clear();
+        PrivateDnsZones.Clear();
+        TrafficManagerProfiles.Clear();
+        NetworkWatchers.Clear();
+        WafPolicies.Clear();
+        CdnProfiles.Clear();
+    }
+
+    private async Task SelectTabAsync(string tab)
+    {
+        ActiveTab = tab;
+        CloseDetail();
+        await LoadActiveTabAsync();
+    }
+
+    private async Task LoadActiveTabAsync()
+    {
+        if (_loadedTabsPerScope.Contains(ActiveTab)) return;
+
+        var subscriptionIds = string.IsNullOrEmpty(SelectedSubscriptionId)
+            ? Subscriptions.Select(s => s.SubscriptionId).ToList()
+            : new List<string> { SelectedSubscriptionId };
+
+        if (subscriptionIds.Count == 0) return;
+
+        IsLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            switch (ActiveTab)
+            {
+                case "Virtual Network":
+                    var vnets = new List<VNetInfo>();
+                    foreach (var sub in subscriptionIds) vnets.AddRange(await NetworkingOps.ListVNetsAsync(sub));
+                    VNets = vnets;
+                    break;
+                case "NSG":
+                    var nsgs = new List<NsgInfo>();
+                    foreach (var sub in subscriptionIds) nsgs.AddRange(await NetworkingOps.ListNsgsAsync(sub));
+                    Nsgs = nsgs;
+                    break;
+                case "Public IP":
+                    var ips = new List<PublicIpInfo>();
+                    foreach (var sub in subscriptionIds) ips.AddRange(await NetworkingOps.ListPublicIpsAsync(sub));
+                    PublicIps = ips;
+                    break;
+                case "Load Balancer":
+                    var lbs = new List<LoadBalancerInfo>();
+                    foreach (var sub in subscriptionIds) lbs.AddRange(await NetworkingOps.ListLoadBalancersAsync(sub));
+                    LoadBalancers = lbs;
+                    break;
+                case "Private Endpoint":
+                    var pes = new List<PrivateEndpointInfo>();
+                    foreach (var sub in subscriptionIds) pes.AddRange(await NetworkingOps.ListPrivateEndpointsAsync(sub));
+                    PrivateEndpoints = pes;
+                    break;
+                case "Network Interface":
+                    var nics = new List<NetworkInterfaceInfo>();
+                    foreach (var sub in subscriptionIds) nics.AddRange(await NetworkingOps.ListNetworkInterfacesAsync(sub));
+                    NetworkInterfaces = nics;
+                    break;
+                case "Private DNS Zone":
+                    var zones = new List<PrivateDnsZoneInfo>();
+                    foreach (var sub in subscriptionIds) zones.AddRange(await NetworkingOps.ListPrivateDnsZonesAsync(sub));
+                    PrivateDnsZones = zones;
+                    break;
+                case "Traffic Manager":
+                    var tmProfiles = new List<TrafficManagerProfileInfo>();
+                    foreach (var sub in subscriptionIds) tmProfiles.AddRange(await NetworkingOps.ListTrafficManagerProfilesAsync(sub));
+                    TrafficManagerProfiles = tmProfiles;
+                    break;
+                case "Network Watcher":
+                    var watchers = new List<NetworkWatcherInfo>();
+                    foreach (var sub in subscriptionIds) watchers.AddRange(await NetworkingOps.ListNetworkWatchersAsync(sub));
+                    NetworkWatchers = watchers;
+                    break;
+                case "WAF Policy":
+                    var wafPolicies = new List<WafPolicyInfo>();
+                    foreach (var sub in subscriptionIds) wafPolicies.AddRange(await NetworkingOps.ListWafPoliciesAsync(sub));
+                    WafPolicies = wafPolicies;
+                    break;
+                case "CDN":
+                    var cdnProfiles = new List<CdnProfileInfo>();
+                    foreach (var sub in subscriptionIds) cdnProfiles.AddRange(await NetworkingOps.ListCdnProfilesAsync(sub));
+                    CdnProfiles = cdnProfiles;
+                    break;
+            }
+
+            _loadedTabsPerScope.Add(ActiveTab);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private static string ResourceGroupOf(string resourceId) =>
+        new Azure.Core.ResourceIdentifier(resourceId).ResourceGroupName ?? "-";
+
+    private async Task OpenDetailAsync(string id, string name)
+    {
+        if (IsBusy) return;
+
+        IsBusy = true;
+        SetStatus(T("Opening {0}...", name), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await LoadDetailAsync(id);
+            DetailId = id;
+            DetailName = name;
+            DetailTab = "overview";
+            ResetRuleForm();
+            SetStatus("", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task LoadDetailAsync(string id)
+    {
+        switch (ActiveTab)
+        {
+            case "Virtual Network":
+                DetailOverview = await NetworkingOps.GetVNetOverviewAsync(id);
+                break;
+            case "NSG":
+                DetailOverview = await NetworkingOps.GetNsgOverviewAsync(id);
+                NsgRules = await NetworkingOps.GetNsgRulesAsync(id);
+                break;
+            case "Public IP":
+                DetailOverview = await NetworkingOps.GetPublicIpOverviewAsync(id);
+                break;
+            case "Load Balancer":
+                DetailOverview = await NetworkingOps.GetLoadBalancerOverviewAsync(id);
+                break;
+            case "Network Interface":
+                DetailOverview = await NetworkingOps.GetNetworkInterfaceOverviewAsync(id);
+                break;
+            case "Private Endpoint":
+                DetailOverview = await NetworkingOps.GetPrivateEndpointOverviewAsync(id);
+                break;
+            case "Private DNS Zone":
+                DetailOverview = await NetworkingOps.GetPrivateDnsZoneOverviewAsync(id);
+                break;
+            case "Traffic Manager":
+                DetailOverview = await NetworkingOps.GetTrafficManagerOverviewAsync(id);
+                break;
+            case "Network Watcher":
+                DetailOverview = await NetworkingOps.GetNetworkWatcherOverviewAsync(id);
+                break;
+            case "WAF Policy":
+                DetailOverview = await NetworkingOps.GetWafPolicyOverviewAsync(id);
+                break;
+            case "CDN":
+                DetailOverview = await NetworkingOps.GetCdnOverviewAsync(id);
+                break;
+        }
+    }
+
+    private void CloseDetail()
+    {
+        DetailId = null;
+        DetailOverview = null;
+        DetailTab = "overview";
+        NsgRules = new();
+        CancelPurge();
+        SetStatus("", error: false);
+    }
+
+    private async Task RefreshDetailAsync()
+    {
+        if (IsBusy || DetailId is null) return;
+
+        IsBusy = true;
+        StateHasChanged();
+
+        try
+        {
+            await LoadDetailAsync(DetailId);
+            SetStatus("", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private void EditRule(NsgRuleInfo rule)
+    {
+        EditingRuleName = rule.Name;
+        RuleName = rule.Name;
+        RulePriority = rule.Priority ?? 100;
+        RuleDirection = rule.Direction;
+        RuleAccess = rule.Access;
+        RuleProtocol = rule.Protocol;
+        RuleSourcePrefix = rule.SourcePrefix;
+        RuleSourcePort = rule.SourcePort;
+        RuleDestinationPrefix = rule.DestinationPrefix;
+        RuleDestinationPort = rule.DestinationPort;
+        RuleFormMessage = "";
+    }
+
+    private void ResetRuleForm()
+    {
+        EditingRuleName = null;
+        RuleName = "";
+        RulePriority = 100;
+        RuleDirection = "Inbound";
+        RuleAccess = "Allow";
+        RuleProtocol = "Tcp";
+        RuleSourcePrefix = "*";
+        RuleSourcePort = "*";
+        RuleDestinationPrefix = "*";
+        RuleDestinationPort = "*";
+        RuleFormMessage = "";
+    }
+
+    private async Task SaveRuleAsync(string nsgId)
+    {
+        IsRuleBusy = true;
+        RuleFormMessage = "";
+        StateHasChanged();
+
+        try
+        {
+            await NetworkingOps.CreateOrUpdateNsgRuleAsync(
+                nsgId, RuleName, RuleDirection, RuleAccess, RuleProtocol,
+                RuleSourcePrefix, RuleSourcePort, RuleDestinationPrefix, RuleDestinationPort, RulePriority);
+            NsgRules = await NetworkingOps.GetNsgRulesAsync(nsgId);
+            var nsgIndex = Nsgs.FindIndex(n => n.Id == nsgId);
+            if (nsgIndex >= 0) Nsgs[nsgIndex] = Nsgs[nsgIndex] with { RuleCount = NsgRules.Count(r => !r.IsDefault) };
+            ResetRuleForm();
+        }
+        catch (Exception ex)
+        {
+            RuleFormMessage = ex.Message;
+        }
+        finally
+        {
+            IsRuleBusy = false;
+        }
+    }
+
+    private async Task DeleteRuleAsync(string nsgId, string ruleName)
+    {
+        // Guards against a double-click firing this twice before the "disabled" attribute
+        // re-renders in the browser: Blazor Server processes UI events one at a time per
+        // circuit, so this in-memory check is enough to make the second click a no-op.
+        if (IsRuleBusy) return;
+        IsRuleBusy = true;
+        StateHasChanged();
+
+        try
+        {
+            await NetworkingOps.DeleteNsgRuleAsync(nsgId, ruleName);
+            NsgRules = await NetworkingOps.GetNsgRulesAsync(nsgId);
+            var nsgIndex = Nsgs.FindIndex(n => n.Id == nsgId);
+            if (nsgIndex >= 0) Nsgs[nsgIndex] = Nsgs[nsgIndex] with { RuleCount = NsgRules.Count(r => !r.IsDefault) };
+            if (EditingRuleName == ruleName) ResetRuleForm();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsRuleBusy = false;
+        }
+    }
+}

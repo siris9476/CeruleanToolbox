@@ -1,0 +1,386 @@
+@using Microsoft.JSInterop
+@inject ConnectionManagerService ConnectionManager
+@inject IConnectionFileDialogService FileDialogService
+@inject IJSRuntime JS
+
+<PageTitle>@T("Connections")</PageTitle>
+
+<h1>@T("Connections")</h1>
+<p>
+    @T("Enter the Tenant ID, Client ID and Client Secret of the service principal (a Microsoft Entra ID app registration). Verify the connection to see which tenants and subscriptions are reachable, then save it: the secret is encrypted with Windows DPAPI (readable only by the current Windows user on the same machine). You can still reveal it in plain text at any time with Show secret in the table below, if you need to enter it elsewhere. To move a connection to another machine (or another app) use Export / Import connection further below instead, protected by a passphrase.")
+</p>
+@Intro
+
+<div class="row mb-2">
+    <div class="col-md-3"><input class="form-control" placeholder='@T("Connection name")' @bind="Name" /></div>
+    <div class="col-md-3"><input class="form-control" placeholder="Tenant ID" @bind="TenantId" /></div>
+    <div class="col-md-3"><input class="form-control" placeholder="Client ID" @bind="ClientId" /></div>
+    <div class="col-md-3"><input type="password" class="form-control" placeholder="Client Secret" @bind="ClientSecret" /></div>
+</div>
+
+<button class="btn btn-outline-primary" disabled="@(!CanTest || IsBusy)" @onclick="TestAsync">
+    @(IsBusy ? T("Verifying...") : T("Verify connection"))
+</button>
+<button class="btn btn-primary" disabled="@(!CanSave || IsBusy)" @onclick="SaveAsync">
+    @T("Save connection")
+</button>
+
+@if (LastResult is not null)
+{
+    @if (LastResult.Success)
+    {
+        <div class="alert alert-success mt-3">
+            @T("Connection successful. Reachable tenants: {0} · Visible subscriptions: {1}", LastResult.Tenants.Count, LastResult.SubscriptionCount)
+            <ul>
+                @foreach (var t in LastResult.Tenants)
+                {
+                    <li>@t.DisplayName (@t.TenantId)</li>
+                }
+            </ul>
+        </div>
+    }
+    else
+    {
+        <div class="alert alert-danger mt-3">@T("Verification failed: {0}", LastResult.ErrorMessage)</div>
+    }
+}
+
+<h3 class="mt-4">@T("Saved connections")</h3>
+<table class="table table-sm">
+    <thead>
+        <tr>
+            <th>@T("Name")</th><th>Tenant</th><th>Client ID</th><th>@T("Created")</th><th>@T("Last verified")</th><th></th>
+        </tr>
+    </thead>
+    <tbody>
+        @foreach (var c in SavedConnections)
+        {
+            <tr class="@(c.Id == ActiveId ? "table-success" : "")" @key="c.Id">
+                <td>@c.Name @(c.Id == ActiveId ? T(" (active)") : "")</td>
+                <td>@c.TenantId</td>
+                <td>@c.ClientId</td>
+                <td>@c.CreatedOn.LocalDateTime</td>
+                <td>@(c.LastVerifiedOn?.LocalDateTime.ToString() ?? "-") @(c.LastVerifiedTenantCount is int tc ? T("({0} tenants, {1} subs)", tc, c.LastVerifiedSubscriptionCount) : "")</td>
+                <td>
+                    @if (c.Id != ActiveId)
+                    {
+                        <button class="btn btn-sm btn-outline-success" @onclick="() => ActivateAsync(c.Id)">@T("Activate")</button>
+                    }
+                    else
+                    {
+                        <button class="btn btn-sm btn-outline-warning" @onclick="() => DeactivateAsync(c.Id)">@T("Deactivate")</button>
+                    }
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => ToggleRevealSecret(c.Id)">
+                        @(RevealedConnectionId == c.Id ? T("Hide secret") : T("Show secret"))
+                    </button>
+                    @if (ExportingConnectionId == c.Id)
+                    {
+                        @if (FileDialogService.UsesNativeFileDialogs)
+                        {
+                            <span class="d-inline-flex align-items-center gap-1">
+                                <input type="password" class="form-control form-control-sm" style="width:9rem;"
+                                       placeholder='@T("Passphrase")' @bind="ExportPassphrase" @bind:event="oninput" />
+                                <input type="password" class="form-control form-control-sm" style="width:9rem;"
+                                       placeholder='@T("Confirm")' @bind="ExportPassphraseConfirm" @bind:event="oninput" />
+                                <button class="btn btn-sm btn-primary" disabled="@(!CanExport)" @onclick="() => ExportNativeAsync(c.Id)">@T("Save to disk")</button>
+                                <button class="btn btn-sm btn-outline-secondary" @onclick="CancelExport">@T("Cancel")</button>
+                            </span>
+                        }
+                        else
+                        {
+                            <form method="post" action="@($"/api/connections/{c.Id}/export")" target="_blank" class="d-inline-flex align-items-center gap-1">
+                                <AntiforgeryToken />
+                                <input type="password" class="form-control form-control-sm" style="width:9rem;"
+                                       placeholder='@T("Passphrase")' name="passphrase" @bind="ExportPassphrase" @bind:event="oninput" />
+                                <input type="password" class="form-control form-control-sm" style="width:9rem;"
+                                       placeholder='@T("Confirm")' @bind="ExportPassphraseConfirm" @bind:event="oninput" />
+                                <button type="submit" class="btn btn-sm btn-primary" disabled="@(!CanExport)">@T("Download")</button>
+                                <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="CancelExport">@T("Cancel")</button>
+                            </form>
+                        }
+                    }
+                    else
+                    {
+                        <button class="btn btn-sm btn-outline-primary" @onclick="() => StartExport(c.Id)">@T("Export")</button>
+                    }
+                    <ConfirmDeleteButton ConfirmText="@c.Name" IsBusy="IsDeleting" OnConfirmed="() => DeleteAsync(c.Id)" />
+                </td>
+            </tr>
+            @if (RevealedConnectionId == c.Id)
+            {
+                <tr><td colspan="6"><code>@RevealedSecretValue</code></td></tr>
+            }
+        }
+    </tbody>
+</table>
+
+<h3 class="mt-4">@T("Import connection")</h3>
+<p class="form-text">
+    @T("Upload a file exported with Export and its passphrase: the Name/Tenant ID/Client ID/Client Secret fields at the top of the page will be filled in, then verify and save as usual. Importing does not save anything automatically.")
+</p>
+<div class="row g-2 align-items-end mb-3">
+    <div class="col-md-4">
+        <label class="form-label">@T("Export file (.ceruleantoolbox)")</label>
+        @if (FileDialogService.UsesNativeFileDialogs)
+        {
+            <div>
+                <button class="btn btn-sm btn-outline-secondary" @onclick="PickImportFileAsync">@T("Select file...")</button>
+                @if (!string.IsNullOrEmpty(ImportFileName))
+                {
+                    <span class="ms-2 text-muted">@ImportFileName</span>
+                }
+            </div>
+        }
+        else
+        {
+            <InputFile OnChange="OnImportFileSelected" class="form-control form-control-sm" />
+        }
+    </div>
+    <div class="col-md-3">
+        <label class="form-label">@T("Passphrase")</label>
+        <input type="password" class="form-control form-control-sm" @bind="ImportPassphrase" @bind:event="oninput" />
+    </div>
+    <div class="col-md-2">
+        <button class="btn btn-sm btn-primary" disabled="@(ImportFileBytes is null || string.IsNullOrEmpty(ImportPassphrase) || IsImporting)" @onclick="ImportAsync">
+            @(IsImporting ? T("Importing...") : T("Import"))
+        </button>
+    </div>
+</div>
+@if (!string.IsNullOrEmpty(ImportMessage))
+{
+    <div class="alert @(ImportError ? "alert-danger" : "alert-success")">@ImportMessage</div>
+}
+
+@code {
+    /// <summary>Optional text of the hosting app, shown under the introduction (e.g. how to bring over connections from another app).</summary>
+    [Parameter] public RenderFragment? Intro { get; set; }
+
+    private string Name { get; set; } = "";
+    private string TenantId { get; set; } = "";
+    private string ClientId { get; set; } = "";
+    private string ClientSecret { get; set; } = "";
+
+    private TestConnectionResult? LastResult { get; set; }
+    private bool IsBusy { get; set; }
+
+    private List<SavedConnection> SavedConnections { get; set; } = new();
+    private string? ActiveId => ConnectionManager.ActiveConnection?.Id;
+
+    private string? RevealedConnectionId { get; set; }
+    private string? RevealedSecretValue { get; set; }
+    private bool IsDeleting { get; set; }
+
+    private string? ExportingConnectionId { get; set; }
+    private string ExportPassphrase { get; set; } = "";
+    private string ExportPassphraseConfirm { get; set; } = "";
+    private bool CanExport => !string.IsNullOrEmpty(ExportPassphrase) && ExportPassphrase == ExportPassphraseConfirm;
+
+    private byte[]? ImportFileBytes { get; set; }
+    private string? ImportFileName { get; set; }
+    private string ImportPassphrase { get; set; } = "";
+    private string ImportMessage { get; set; } = "";
+    private bool ImportError { get; set; }
+    private bool IsImporting { get; set; }
+
+    private bool CanTest =>
+        !string.IsNullOrWhiteSpace(TenantId) &&
+        !string.IsNullOrWhiteSpace(ClientId) &&
+        !string.IsNullOrWhiteSpace(ClientSecret);
+
+    private bool CanSave => CanTest && !string.IsNullOrWhiteSpace(Name) && LastResult is { Success: true };
+
+    protected override void OnInitialized()
+    {
+        SavedConnections = ConnectionManager.GetAll();
+    }
+
+    private async Task TestAsync()
+    {
+        IsBusy = true;
+        LastResult = null;
+        StateHasChanged();
+
+        try
+        {
+            LastResult = await ConnectionManager.TestConnectionAsync(TenantId, ClientId, ClientSecret);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private Task SaveAsync()
+    {
+        ConnectionManager.SaveConnection(Name, TenantId, ClientId, ClientSecret, LastResult, makeActive: true);
+
+        Name = "";
+        TenantId = "";
+        ClientId = "";
+        ClientSecret = "";
+        LastResult = null;
+        SavedConnections = ConnectionManager.GetAll();
+
+        return Task.CompletedTask;
+    }
+
+    // Changing the active connection changes what every page shows (and acts on), so it asks first when another one is active.
+    private async Task ActivateAsync(string id)
+    {
+        var current = ConnectionManager.ActiveConnection;
+        if (current is not null && current.Id != id)
+        {
+            var target = SavedConnections.FirstOrDefault(c => c.Id == id)?.Name ?? "";
+            var message = T("Switch the active connection from '{0}' to '{1}'? The pages will then use the resources that '{1}' can reach.", current.Name, target);
+            if (!await JS.InvokeAsync<bool>("confirm", message)) return;
+        }
+
+        ConnectionManager.SetActive(id);
+        SavedConnections = ConnectionManager.GetAll();
+    }
+
+    // No connection active is a valid state: the pages then ask for one instead of acting on Azure.
+    private async Task DeactivateAsync(string id)
+    {
+        var name = SavedConnections.FirstOrDefault(c => c.Id == id)?.Name ?? "";
+        if (!await JS.InvokeAsync<bool>("confirm", T("Deactivate '{0}'? No connection will be active until you activate one.", name))) return;
+
+        ConnectionManager.ClearActive();
+        SavedConnections = ConnectionManager.GetAll();
+    }
+
+    private Task DeleteAsync(string id)
+    {
+        // Guards against a double-click firing this twice before the "disabled" attribute
+        // re-renders in the browser: Blazor Server processes UI events one at a time per
+        // circuit, so this in-memory check is enough to make the second click a no-op.
+        if (IsDeleting) return Task.CompletedTask;
+        IsDeleting = true;
+
+        try
+        {
+            ConnectionManager.Delete(id);
+            SavedConnections = ConnectionManager.GetAll();
+            if (RevealedConnectionId == id)
+            {
+                RevealedConnectionId = null;
+                RevealedSecretValue = null;
+            }
+        }
+        finally
+        {
+            IsDeleting = false;
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private void ToggleRevealSecret(string id)
+    {
+        if (RevealedConnectionId == id)
+        {
+            RevealedConnectionId = null;
+            RevealedSecretValue = null;
+            return;
+        }
+
+        RevealedSecretValue = ConnectionManager.RevealSecret(id);
+        RevealedConnectionId = id;
+    }
+
+    private void StartExport(string id)
+    {
+        ExportingConnectionId = id;
+        ExportPassphrase = "";
+        ExportPassphraseConfirm = "";
+    }
+
+    private void CancelExport()
+    {
+        ExportingConnectionId = null;
+        ExportPassphrase = "";
+        ExportPassphraseConfirm = "";
+    }
+
+    private async Task ExportNativeAsync(string id)
+    {
+        if (!CanExport) return;
+
+        try
+        {
+            var connection = SavedConnections.FirstOrDefault(c => c.Id == id);
+            var safeName = string.Concat((connection?.Name ?? T("connection")).Split(Path.GetInvalidFileNameChars()));
+            if (string.IsNullOrWhiteSpace(safeName)) safeName = T("connection");
+
+            var bytes = ConnectionManager.ExportEncrypted(id, ExportPassphrase);
+            await FileDialogService.SaveFileAsync(bytes, $"{safeName}.ceruleantoolbox");
+            CancelExport();
+        }
+        catch (Exception ex)
+        {
+            ImportMessage = ex.Message;
+            ImportError = true;
+        }
+    }
+
+    private async Task PickImportFileAsync()
+    {
+        ImportMessage = "";
+        var picked = await FileDialogService.PickFileToImportAsync();
+        if (picked is null) return;
+
+        ImportFileBytes = picked.Value.Bytes;
+        ImportFileName = picked.Value.FileName;
+    }
+
+    private async Task OnImportFileSelected(InputFileChangeEventArgs e)
+    {
+        ImportMessage = "";
+        try
+        {
+            // Encrypted export envelopes are a few hundred bytes; 1 MB is generous headroom.
+            using var stream = e.File.OpenReadStream(maxAllowedSize: 1024 * 1024);
+            using var ms = new MemoryStream();
+            await stream.CopyToAsync(ms);
+            ImportFileBytes = ms.ToArray();
+        }
+        catch (Exception ex)
+        {
+            ImportFileBytes = null;
+            ImportMessage = ex.Message;
+            ImportError = true;
+        }
+    }
+
+    private Task ImportAsync()
+    {
+        if (ImportFileBytes is null) return Task.CompletedTask;
+
+        IsImporting = true;
+        try
+        {
+            var payload = ConnectionManagerService.DecryptExport(ImportFileBytes, ImportPassphrase);
+            Name = payload.Name;
+            TenantId = payload.TenantId;
+            ClientId = payload.ClientId;
+            ClientSecret = payload.ClientSecret;
+            LastResult = null;
+            ImportMessage = T("Connection imported into the fields above: press Verify connection and then Save connection to finish.");
+            ImportError = false;
+            ImportPassphrase = "";
+            ImportFileBytes = null;
+            ImportFileName = null;
+        }
+        catch (Exception ex)
+        {
+            ImportMessage = ex.Message;
+            ImportError = true;
+        }
+        finally
+        {
+            IsImporting = false;
+        }
+
+        return Task.CompletedTask;
+    }
+}

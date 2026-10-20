@@ -1,0 +1,515 @@
+@page "/storage"
+@using CeruleanToolbox.Services
+@inject ResourceInventoryService Inventory
+@inject StorageManagementService StorageOps
+@inherits CeruleanToolboxPageBase
+
+<PageTitle>Storage</PageTitle>
+
+<h1>Storage Account</h1>
+
+@if (SelectedAccount is null)
+{
+    <p>
+        @T("Lists the storage accounts. Click an account name, or double-click its row, to open its overview, containers and blobs.")
+    </p>
+
+    <div class="row mb-3">
+        <div class="col-md-6">
+            <label class="form-label">@T("Subscription (optional)")</label>
+            <SearchableSelect TItem="SubscriptionInfo" Items="Subscriptions"
+                               GetLabel="@(s => $"{s.DisplayName} ({s.SubscriptionId})")" GetValue="@(s => s.SubscriptionId)"
+                               SelectedValue="SelectedSubscriptionId" SelectedValueChanged="OnSubscriptionChangedAsync"
+                               Placeholder='@T("-- all --")' Disabled="@(IsLoading || IsBusy)" />
+        </div>
+        <div class="col-md-4">
+            <label class="form-label">@T("Filter by name")</label>
+            <input class="form-control" placeholder='@T("filter...")' @bind="NameFilter" @bind:event="oninput" />
+        </div>
+    </div>
+}
+
+@if (!string.IsNullOrEmpty(StatusMessage))
+{
+    <div class="alert @(IsError ? "alert-danger" : "alert-info")">@StatusMessage</div>
+}
+
+@if (SelectedAccount is null)
+{
+    @if (string.IsNullOrEmpty(SelectedSubscriptionId) && !HasLoadedAllSubscriptions && !IsLoading)
+    {
+        <div class="alert alert-secondary">
+            @T("No subscription selected: pick one for a quick view, or")
+            <button class="btn btn-sm btn-outline-primary" @onclick="LoadAllSubscriptionsAsync">@T("Load all subscriptions")</button>
+            @T("— it may take a while if you have many.")
+        </div>
+    }
+
+    @if (IsLoading)
+    {
+        <div class="d-flex align-items-center gap-2 mb-3">
+            <div class="spinner-border spinner-border-sm text-primary" role="status" aria-hidden="true"></div>
+            <span>@T("Loading storage accounts...")</span>
+        </div>
+    }
+
+    @if (!IsLoading && (!string.IsNullOrEmpty(SelectedSubscriptionId) || HasLoadedAllSubscriptions))
+    {
+        @if (!FilteredAccounts.Any())
+        {
+            <p><em>@T("No storage accounts found.")</em></p>
+        }
+        else
+        {
+            <table class="table table-sm table-hover align-middle">
+                <thead>
+                    <tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>Location</th><th>@T("Type")</th><th>@T("Replication")</th><th>@T("Network")</th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var acc in FilteredAccounts)
+                    {
+                        <tr style="cursor: pointer;" title="@T("Double-click to open the account")" @ondblclick="() => OpenAccountAsync(acc)">
+                            <td>
+                                <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenAccountAsync(acc)">
+                                    @acc.Name <span aria-hidden="true">&rsaquo;</span>
+                                </button>
+                            </td>
+                            <td>@GetSubscriptionName(acc.Id)</td>
+                            <td>@acc.ResourceGroup</td>
+                            <td>@acc.Location</td>
+                            <td>@acc.Kind</td>
+                            <td>@acc.Replication</td>
+                            <td>@(acc.HasNetworkRestrictions ? T("🔒 restricted") : T("open"))</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+    }
+}
+else
+{
+    <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
+        <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" @onclick="CloseAccount">&larr; Storage Account</button>
+        <h4 class="mb-0">@SelectedAccount.Name</h4>
+        @if (Overview is not null)
+        {
+            <span class="badge bg-secondary">@Overview.Status</span>
+        }
+        <button class="btn btn-sm btn-outline-secondary ms-auto" disabled="@IsBusy" @onclick="RefreshAccountAsync">@T("Refresh")</button>
+    </div>
+    <p class="text-muted small">
+        @GetSubscriptionName(SelectedAccount.Id) · Resource group @SelectedAccount.ResourceGroup · @SelectedAccount.Location
+    </p>
+
+    <ul class="nav nav-tabs mb-3">
+        <li class="nav-item"><button class="nav-link @(ActiveTab == "overview" ? "active" : "")" @onclick='() => ActiveTab = "overview"'>@T("Overview")</button></li>
+        <li class="nav-item"><button class="nav-link @(ActiveTab == "blobs" ? "active" : "")" @onclick='() => ActiveTab = "blobs"'>@T("Containers and blobs")</button></li>
+        <li class="nav-item"><button class="nav-link @(ActiveTab == "terraform" ? "active" : "")" @onclick='() => ActiveTab = "terraform"'>Terraform state</button></li>
+    </ul>
+
+    @if (ActiveTab == "overview" && Overview is not null)
+    {
+        <ResourceOverviewView Overview="Overview" />
+    }
+    else if (ActiveTab == "blobs" || ActiveTab == "terraform")
+    {
+    @if (SelectedAccount.HasNetworkRestrictions)
+    {
+        <div class="alert alert-warning">
+            <strong>@T("Restricted network:")</strong> @T("public access '{0}', default network rule '{1}'.", SelectedAccount.PublicNetworkAccess, SelectedAccount.NetworkDefaultAction)
+            @T("If the container/blob calls below fail with") <code>403 AuthorizationFailure</code>@T(", it is almost always this firewall blocking them before the RBAC roles are evaluated — not a permissions problem of the service principal. Add the IP/network this app runs from to the storage account's allowed rules, or use a private endpoint reachable from here.")
+        </div>
+    }
+
+        @if (string.IsNullOrEmpty(SelectedAccount.BlobEndpoint))
+        {
+            <p class="text-danger">@T("This storage account does not have the blob service enabled.")</p>
+        }
+        else if (ActiveTab == "terraform")
+        {
+        <div class="mb-3">
+            <button class="btn btn-outline-primary" disabled="@IsBusy" @onclick="ScanForTerraformStateAsync">
+                @T("Scan the whole account for Terraform state files (.tfstate)")
+            </button>
+        </div>
+
+        @if (TerraformCandidatesScanned)
+        {
+            @if (TerraformCandidates.Count == 0)
+            {
+                <div class="alert alert-secondary">@T("No blob with a name ending in") <code>.tfstate</code> @T("found in this storage account.")</div>
+            }
+            else
+            {
+                <h3>@T("Terraform state files found")</h3>
+                <table class="table table-sm">
+                    <thead><tr><th>Container</th><th>Blob</th><th>@T("Size")</th><th>@T("Last modified")</th><th></th></tr></thead>
+                    <tbody>
+                        @foreach (var candidate in TerraformCandidates)
+                        {
+                            var key = $"{candidate.ContainerName}/{candidate.BlobName}";
+                            <tr>
+                                <td>@candidate.ContainerName</td>
+                                <td>@candidate.BlobName</td>
+                                <td>@FormatSize(candidate.SizeBytes)</td>
+                                <td>@candidate.LastModified?.LocalDateTime</td>
+                                <td>
+                                    <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy"
+                                            @onclick="() => VerifyAsync(candidate)">
+                                        @T("Verify content")
+                                    </button>
+                                </td>
+                            </tr>
+                            @if (VerificationResults.TryGetValue(key, out var check))
+                            {
+                                <tr>
+                                    <td colspan="5">
+                                        @if (check.IsTerraformState)
+                                        {
+                                            <div class="alert alert-success mb-0">
+                                                @T("Confirmed: valid Terraform state — version") <code>@check.TerraformVersion</code>@T(", {0} managed resources.", check.ResourceCount)
+                                            </div>
+                                        }
+                                        else
+                                        {
+                                            <div class="alert alert-warning mb-0">@T("Not a valid Terraform state file:") @check.Error</div>
+                                        }
+                                    </td>
+                                </tr>
+                            }
+                        }
+                    </tbody>
+                </table>
+            }
+        }
+
+        }
+        else
+        {
+        <h3>Container</h3>
+        <table class="table table-sm">
+            <thead><tr><th>@T("Name")</th><th>@T("Public access")</th><th></th></tr></thead>
+            <tbody>
+                @foreach (var container in Containers)
+                {
+                    <tr>
+                        <td>@container.Name</td>
+                        <td>@(container.PublicAccess ? T("Yes") : T("No"))</td>
+                        <td><button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" @onclick="() => LoadBlobsAsync(container.Name)">@T("Browse blobs")</button></td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+
+        @if (SelectedContainer is not null)
+        {
+            <h3>@T("Blobs in {0}", SelectedContainer)</h3>
+            @if (Blobs.Count == 0)
+            {
+                <p><em>@T("Empty container.")</em></p>
+            }
+            else
+            {
+                <table class="table table-sm">
+                    <thead><tr><th>@T("Name")</th><th>@T("Size")</th><th>@T("Last modified")</th><th></th></tr></thead>
+                    <tbody>
+                        @foreach (var blob in Blobs)
+                        {
+                            <tr class="@(blob.LooksLikeTerraformState ? "table-warning" : "")">
+                                <td>@blob.Name @(blob.LooksLikeTerraformState ? T(" 🔶 possible tfstate") : "")</td>
+                                <td>@FormatSize(blob.SizeBytes)</td>
+                                <td>@blob.LastModified?.LocalDateTime</td>
+                                <td>
+                                    @if (blob.LooksLikeTerraformState)
+                                    {
+                                        <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy"
+                                                @onclick="() => VerifyAsync(new TerraformStateCandidate(SelectedContainer!, blob.Name, blob.SizeBytes, blob.LastModified))">
+                                            @T("Verify content")
+                                        </button>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        }
+        }
+    }
+}
+
+@code {
+    private List<StorageAccountInfo> Accounts { get; set; } = new();
+    private List<BlobContainerInfo> Containers { get; set; } = new();
+    private List<BlobItemInfo> Blobs { get; set; } = new();
+    private List<TerraformStateCandidate> TerraformCandidates { get; set; } = new();
+    private Dictionary<string, TerraformStateCheckResult> VerificationResults { get; set; } = new();
+
+    private string SelectedSubscriptionId { get; set; } = "";
+    private string SelectedAccountId { get; set; } = "";
+    private string NameFilter { get; set; } = "";
+    private ResourceOverview? Overview { get; set; }
+    private string ActiveTab { get; set; } = "overview";
+    private string? SelectedContainer { get; set; }
+    private bool TerraformCandidatesScanned { get; set; }
+
+    private StorageAccountInfo? SelectedAccount => Accounts.FirstOrDefault(a => a.Id == SelectedAccountId);
+
+    private IEnumerable<StorageAccountInfo> FilteredAccounts => Accounts.Where(a =>
+        string.IsNullOrWhiteSpace(NameFilter) || a.Name.Contains(NameFilter, StringComparison.OrdinalIgnoreCase));
+
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            Subscriptions = await Inventory.ListSubscriptionsAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+
+        await AutoOpenAsync();
+    }
+
+    private async Task AutoOpenAsync()
+    {
+        var id = RequestedResourceId;
+        if (id is null || Subscriptions.Count == 0) return;
+
+        await OnSubscriptionChangedAsync(RequestedSubscriptionId ?? "");
+        var item = Accounts.FirstOrDefault(x => string.Equals(x.Id, id, StringComparison.OrdinalIgnoreCase));
+        if (item is not null)
+        {
+            await OpenAccountAsync(item);
+        }
+    }
+
+    private async Task OnSubscriptionChangedAsync(string subscriptionId)
+    {
+        SelectedSubscriptionId = subscriptionId;
+        ClearAccountSelection();
+        HasLoadedAllSubscriptions = false;
+
+        // Clearing back to "all" doesn't auto-load: fetching every subscription is expensive,
+        // so it waits for the explicit button below instead of firing on every selection change.
+        if (string.IsNullOrEmpty(SelectedSubscriptionId)) return;
+
+        IsLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            Accounts = await StorageOps.ListAllAsync(SelectedSubscriptionId);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private async Task LoadAllSubscriptionsAsync()
+    {
+        HasLoadedAllSubscriptions = true;
+        IsLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            var accounts = new List<StorageAccountInfo>();
+            foreach (var sub in Subscriptions)
+            {
+                accounts.AddRange(await StorageOps.ListAllAsync(sub.SubscriptionId));
+            }
+
+            Accounts = accounts;
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private async Task OpenAccountAsync(StorageAccountInfo account)
+    {
+        if (IsBusy) return;
+
+        IsBusy = true;
+        SetStatus(T("Opening {0}...", account.Name), error: false);
+        StateHasChanged();
+
+        try
+        {
+            Overview = await StorageOps.GetOverviewAsync(account.Id);
+            ResetAccountDetail();
+            SelectedAccountId = account.Id;
+            ActiveTab = "overview";
+
+            // Container browsing is a data-plane call: when the account's firewall blocks this
+            // machine it fails with 403, which must not stop the management-plane overview above.
+            if (!string.IsNullOrEmpty(account.BlobEndpoint))
+            {
+                try
+                {
+                    Containers = await StorageOps.ListContainersAsync(account.BlobEndpoint);
+                    SetStatus("", error: false);
+                }
+                catch (Exception ex)
+                {
+                    SetStatus(T("Listing containers (data access) failed: {0}", ex.Message), error: true);
+                }
+            }
+            else
+            {
+                SetStatus("", error: false);
+            }
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private void ResetAccountDetail()
+    {
+        Containers.Clear();
+        Blobs.Clear();
+        SelectedContainer = null;
+        TerraformCandidates.Clear();
+        TerraformCandidatesScanned = false;
+        VerificationResults.Clear();
+    }
+
+    private void CloseAccount()
+    {
+        SelectedAccountId = "";
+        Overview = null;
+        ResetAccountDetail();
+        SetStatus("", error: false);
+    }
+
+    private async Task RefreshAccountAsync()
+    {
+        if (IsBusy || SelectedAccount is null) return;
+
+        IsBusy = true;
+        StateHasChanged();
+
+        try
+        {
+            Overview = await StorageOps.GetOverviewAsync(SelectedAccount.Id);
+            SetStatus("", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private void ClearAccountSelection()
+    {
+        Accounts.Clear();
+        SelectedAccountId = "";
+        Containers.Clear();
+        Blobs.Clear();
+        SelectedContainer = null;
+        TerraformCandidates.Clear();
+        TerraformCandidatesScanned = false;
+        VerificationResults.Clear();
+    }
+
+    private async Task LoadBlobsAsync(string containerName)
+    {
+        IsBusy = true;
+        StateHasChanged();
+
+        try
+        {
+            Blobs = await StorageOps.ListBlobsAsync(SelectedAccount!.BlobEndpoint!, containerName);
+            SelectedContainer = containerName;
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task ScanForTerraformStateAsync()
+    {
+        IsBusy = true;
+        SetStatus(T("Scanning all containers..."), error: false);
+        VerificationResults.Clear();
+        StateHasChanged();
+
+        try
+        {
+            TerraformCandidates = await StorageOps.ScanForTerraformStateAsync(SelectedAccount!.BlobEndpoint!);
+            TerraformCandidatesScanned = true;
+            SetStatus(T("Scan complete: {0} possible state files found.", TerraformCandidates.Count), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task VerifyAsync(TerraformStateCandidate candidate)
+    {
+        IsBusy = true;
+        StateHasChanged();
+
+        try
+        {
+            var result = await StorageOps.VerifyTerraformStateAsync(SelectedAccount!.BlobEndpoint!, candidate.ContainerName, candidate.BlobName);
+            VerificationResults[$"{candidate.ContainerName}/{candidate.BlobName}"] = result;
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private static string FormatSize(long? bytes)
+    {
+        if (bytes is null) return "-";
+        double size = bytes.Value;
+        string[] units = { "B", "KB", "MB", "GB" };
+        var unitIndex = 0;
+        while (size >= 1024 && unitIndex < units.Length - 1)
+        {
+            size /= 1024;
+            unitIndex++;
+        }
+        return $"{size:N1} {units[unitIndex]}";
+    }
+}

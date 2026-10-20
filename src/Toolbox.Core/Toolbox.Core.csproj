@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk.Razor">
+
+  <!-- Shared by the apps built on it (CeruleanToolbox web + desktop): saved connections, Azure clients,
+       ARM REST helper, Resource Graph, the VM diagnostics and the shared components (Connections page, confirm button, searchable select).
+       Neutral on purpose: it belongs to neither app, and each app names its own connection folder. -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Toolbox.Core</RootNamespace>
+    <AddRazorSupportForMvc>false</AddRazorSupportForMvc>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Using Include="Toolbox.Core.Localization" />
+    <Using Include="Toolbox.Core.Localization.Tr" Static="true" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Locales\*.json" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Azure.Identity" Version="1.21.0" />
+    <PackageReference Include="Azure.ResourceManager" Version="1.14.0" />
+    <PackageReference Include="Azure.ResourceManager.Compute" Version="1.17.0" />
+    <PackageReference Include="Azure.ResourceManager.Resources" Version="1.12.0" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.12" />
+  </ItemGroup>
+
+</Project>

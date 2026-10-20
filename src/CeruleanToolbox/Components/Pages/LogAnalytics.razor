@@ -1,0 +1,434 @@
+@page "/loganalytics"
+@using CeruleanToolbox.Services
+@inject ResourceInventoryService Inventory
+@inject LogAnalyticsService LogAnalyticsOps
+@inherits CeruleanToolboxPageBase
+
+<PageTitle>Log Analytics</PageTitle>
+
+<h1>Log Analytics</h1>
+
+@if (SelectedWorkspace is null)
+{
+    <p>
+        @T("Lists the Log Analytics workspaces. Click a workspace name, or double-click its row, to open its overview, query it with KQL and see the legacy solutions. Unlike App Insights, which collects application telemetry, here you find infrastructure and platform logs.")
+    </p>
+
+    <div class="row mb-3">
+        <div class="col-md-6">
+            <label class="form-label">@T("Subscription (optional)")</label>
+            <SearchableSelect TItem="SubscriptionInfo" Items="Subscriptions"
+                               GetLabel="@(s => $"{s.DisplayName} ({s.SubscriptionId})")" GetValue="@(s => s.SubscriptionId)"
+                               SelectedValue="SelectedSubscriptionId" SelectedValueChanged="OnSubscriptionChangedAsync"
+                               Placeholder='@T("-- all --")' Disabled="@(IsLoading || IsBusy)" />
+        </div>
+        <div class="col-md-4">
+            <label class="form-label">@T("Filter by name")</label>
+            <input class="form-control" placeholder='@T("filter...")' @bind="NameFilter" @bind:event="oninput" />
+        </div>
+    </div>
+}
+
+@if (!string.IsNullOrEmpty(StatusMessage))
+{
+    <div class="alert @(IsError ? "alert-danger" : "alert-info")">@StatusMessage</div>
+}
+
+@if (SelectedWorkspace is null)
+{
+    @if (string.IsNullOrEmpty(SelectedSubscriptionId) && !HasLoadedAllSubscriptions && !IsLoading)
+    {
+        <div class="alert alert-secondary">
+            @T("No subscription selected: choose one for a quick view, or")
+            <button class="btn btn-sm btn-outline-primary" @onclick="LoadAllSubscriptionsAsync">@T("Load all subscriptions")</button>
+            @T("— it may take a while if you have many.")
+        </div>
+    }
+
+    @if (IsLoading)
+    {
+        <div class="d-flex align-items-center gap-2 mb-3">
+            <div class="spinner-border spinner-border-sm text-primary" role="status" aria-hidden="true"></div>
+            <span>@T("Loading workspaces...")</span>
+        </div>
+    }
+
+    @if (!IsLoading && (!string.IsNullOrEmpty(SelectedSubscriptionId) || HasLoadedAllSubscriptions))
+    {
+        @if (!FilteredWorkspaces.Any())
+        {
+            <p><em>@T("No workspaces found.")</em></p>
+        }
+        else
+        {
+            <table class="table table-sm table-hover align-middle">
+                <thead>
+                    <tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>Location</th><th>SKU</th><th>@T("Retention (days)")</th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var workspace in FilteredWorkspaces)
+                    {
+                        <tr style="cursor: pointer;" title='@T("Double-click to open the workspace")' @ondblclick="() => OpenWorkspaceAsync(workspace)">
+                            <td>
+                                <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenWorkspaceAsync(workspace)">
+                                    @workspace.Name <span aria-hidden="true">&rsaquo;</span>
+                                </button>
+                            </td>
+                            <td>@GetSubscriptionName(workspace.Id)</td>
+                            <td>@workspace.ResourceGroup</td>
+                            <td>@workspace.Location</td>
+                            <td>@workspace.Sku</td>
+                            <td>@(workspace.RetentionInDays?.ToString() ?? "-")</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+    }
+}
+else
+{
+    <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
+        <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" @onclick="CloseWorkspace">&larr; Log Analytics</button>
+        <h4 class="mb-0">@SelectedWorkspace.Name</h4>
+        @if (Overview is not null)
+        {
+            <span class="badge bg-secondary">@Overview.Status</span>
+        }
+        <button class="btn btn-sm btn-outline-secondary ms-auto" disabled="@IsBusy" @onclick="RefreshWorkspaceAsync">@T("Refresh")</button>
+    </div>
+    <p class="text-muted small">
+        @GetSubscriptionName(SelectedWorkspace.Id) · Resource group @SelectedWorkspace.ResourceGroup · @SelectedWorkspace.Location
+    </p>
+
+    <ul class="nav nav-tabs mb-3">
+        <li class="nav-item"><button class="nav-link @(ActiveTab == "overview" ? "active" : "")" @onclick='() => ActiveTab = "overview"'>@T("Overview")</button></li>
+        <li class="nav-item"><button class="nav-link @(ActiveTab == "query" ? "active" : "")" @onclick='() => ActiveTab = "query"'>Query KQL</button></li>
+        <li class="nav-item"><button class="nav-link @(ActiveTab == "solutions" ? "active" : "")" @onclick='() => ActiveTab = "solutions"'>Solutions</button></li>
+    </ul>
+
+    @if (ActiveTab == "overview" && Overview is not null)
+    {
+        <ResourceOverviewView Overview="Overview" />
+    }
+    else if (ActiveTab == "query")
+    {
+        <p class="text-muted small">
+            @T("Query the data collected in the workspace with KQL (")<code>AzureActivity</code>, <code>Heartbeat</code>,
+            <code>Perf</code>, <code>Syslog</code>/<code>Event</code>@T(", diagnostic settings of other resources).")
+        </p>
+    <div class="mb-3">
+        <label class="form-label">Query KQL</label>
+        <textarea class="form-control" rows="6" @bind="QueryText"></textarea>
+        <div class="form-text">
+            @T("Examples:") <code>AzureActivity | order by TimeGenerated desc | take 50</code> ·
+            <code>Heartbeat | summarize arg_max(TimeGenerated, *) by Computer</code> ·
+            <code>Perf | where CounterName == "% Processor Time" | order by TimeGenerated desc | take 50</code>
+        </div>
+    </div>
+
+    <div class="row mb-3">
+        <div class="col-md-3">
+            <label class="form-label">@T("Time range")</label>
+            <select class="form-select" @bind="LookbackHours">
+                <option value="1">@T("Last hour")</option>
+                <option value="24">@T("Last 24 hours")</option>
+                <option value="168">@T("Last 7 days")</option>
+                <option value="720">@T("Last 30 days")</option>
+            </select>
+        </div>
+        <div class="col-md-3 d-flex align-items-end">
+            <button class="btn btn-primary" disabled="@(string.IsNullOrWhiteSpace(QueryText) || IsBusy)" @onclick="RunQueryAsync">
+                @(IsBusy ? T("Running...") : T("Run query"))
+            </button>
+        </div>
+    </div>
+
+    @if (QueryResult is not null)
+    {
+        <h3>@T("Results ({0} of {1} rows)", QueryResult.Rows.Count, QueryResult.TotalRowCount)</h3>
+        @if (QueryResult.Truncated)
+        {
+            <div class="alert alert-warning">
+                @T("Showing only the first {0} rows out of {1} — beyond this limit the browser freezes rendering the table. Narrow the query with", QueryResult.Rows.Count, QueryResult.TotalRowCount)
+                <code>take</code>, <code>summarize</code> @T("or additional filters to see more targeted results.")
+            </div>
+        }
+        <div style="overflow: auto; max-height: 500px;">
+            <table class="table table-sm">
+                <thead>
+                    <tr>
+                        @foreach (var column in QueryResult.Columns)
+                        {
+                            <th>@column</th>
+                        }
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var row in QueryResult.Rows)
+                    {
+                        <tr>
+                            @foreach (var cell in row)
+                            {
+                                <td>@cell</td>
+                            }
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+    }
+    else if (ActiveTab == "solutions")
+    {
+    <h6>Solutions (legacy)</h6>
+    <p class="text-muted">
+        @T("Legacy per-workspace add-ons (Update Management, Security & Audit, etc.) that predate the unified Azure Monitor experience.")
+    </p>
+    @if (Solutions is null)
+    {
+        <button class="btn btn-sm btn-outline-primary" disabled="@IsBusy" @onclick="LoadSolutionsAsync">@T("Load solutions")</button>
+    }
+    else if (!WorkspaceSolutions.Any())
+    {
+        <p><em>@T("No solutions found.")</em></p>
+    }
+    else
+    {
+        <table class="table table-sm">
+            <thead><tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>Location</th></tr></thead>
+            <tbody>
+                @foreach (var solution in WorkspaceSolutions)
+                {
+                    <tr>
+                        <td>@solution.Name</td>
+                        <td>@GetSubscriptionName(solution.Id)</td>
+                        <td>@solution.ResourceGroup</td>
+                        <td>@solution.Location</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+    }
+}
+
+@code {
+    private List<LogAnalyticsWorkspaceInfo> Workspaces { get; set; } = new();
+    private LogAnalyticsQueryResult? QueryResult { get; set; }
+    private List<LogAnalyticsSolutionInfo>? Solutions { get; set; }
+
+    private string SelectedSubscriptionId { get; set; } = "";
+    private string SelectedWorkspaceId { get; set; } = "";
+    private string NameFilter { get; set; } = "";
+    private ResourceOverview? Overview { get; set; }
+    private string ActiveTab { get; set; } = "overview";
+    private string QueryText { get; set; } = "AzureActivity | order by TimeGenerated desc | take 50";
+    private int LookbackHours { get; set; } = 24;
+
+    private LogAnalyticsWorkspaceInfo? SelectedWorkspace =>
+        Workspaces.FirstOrDefault(w => w.Id == SelectedWorkspaceId);
+
+    private IEnumerable<LogAnalyticsWorkspaceInfo> FilteredWorkspaces => Workspaces.Where(w =>
+        string.IsNullOrWhiteSpace(NameFilter) || w.Name.Contains(NameFilter, StringComparison.OrdinalIgnoreCase));
+
+    // Solutions are named "Solution(workspaceName)"; show only the ones of the open workspace.
+    private IEnumerable<LogAnalyticsSolutionInfo> WorkspaceSolutions =>
+        (Solutions ?? new()).Where(x => SelectedWorkspace is not null &&
+            x.Name.Contains($"({SelectedWorkspace.Name})", StringComparison.OrdinalIgnoreCase));
+
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            Subscriptions = await Inventory.ListSubscriptionsAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+
+        await AutoOpenAsync();
+    }
+
+    private async Task AutoOpenAsync()
+    {
+        var id = RequestedResourceId;
+        if (id is null || Subscriptions.Count == 0) return;
+
+        await OnSubscriptionChangedAsync(RequestedSubscriptionId ?? "");
+        var item = Workspaces.FirstOrDefault(x => string.Equals(x.Id, id, StringComparison.OrdinalIgnoreCase));
+        if (item is not null)
+        {
+            await OpenWorkspaceAsync(item);
+        }
+    }
+
+    private async Task OnSubscriptionChangedAsync(string subscriptionId)
+    {
+        SelectedSubscriptionId = subscriptionId;
+        Workspaces.Clear();
+        SelectedWorkspaceId = "";
+        QueryResult = null;
+        HasLoadedAllSubscriptions = false;
+        Solutions = null;
+
+        // Clearing back to "all" doesn't auto-load: fetching every subscription is expensive,
+        // so it waits for the explicit button below instead of firing on every selection change.
+        if (string.IsNullOrEmpty(SelectedSubscriptionId)) return;
+
+        IsLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            Workspaces = await LogAnalyticsOps.ListAllAsync(SelectedSubscriptionId);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private async Task LoadAllSubscriptionsAsync()
+    {
+        HasLoadedAllSubscriptions = true;
+        Solutions = null;
+        IsLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            var workspaces = new List<LogAnalyticsWorkspaceInfo>();
+            foreach (var sub in Subscriptions)
+            {
+                workspaces.AddRange(await LogAnalyticsOps.ListAllAsync(sub.SubscriptionId));
+            }
+
+            Workspaces = workspaces;
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private async Task OpenWorkspaceAsync(LogAnalyticsWorkspaceInfo workspace)
+    {
+        if (IsBusy) return;
+
+        IsBusy = true;
+        SetStatus(T("Opening {0}...", workspace.Name), error: false);
+        StateHasChanged();
+
+        try
+        {
+            Overview = await LogAnalyticsOps.GetOverviewAsync(workspace.Id);
+            SelectedWorkspaceId = workspace.Id;
+            ActiveTab = "overview";
+            QueryResult = null;
+            Solutions = null;
+            SetStatus("", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private void CloseWorkspace()
+    {
+        SelectedWorkspaceId = "";
+        Overview = null;
+        QueryResult = null;
+        Solutions = null;
+        SetStatus("", error: false);
+    }
+
+    private async Task RefreshWorkspaceAsync()
+    {
+        if (IsBusy || SelectedWorkspace is null) return;
+
+        IsBusy = true;
+        StateHasChanged();
+
+        try
+        {
+            Overview = await LogAnalyticsOps.GetOverviewAsync(SelectedWorkspace.Id);
+            SetStatus("", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task LoadSolutionsAsync()
+    {
+        IsBusy = true;
+        StateHasChanged();
+
+        try
+        {
+            var subscriptionIds = string.IsNullOrEmpty(SelectedSubscriptionId)
+                ? Subscriptions.Select(s => s.SubscriptionId).ToList()
+                : new List<string> { SelectedSubscriptionId };
+
+            var solutions = new List<LogAnalyticsSolutionInfo>();
+            foreach (var sub in subscriptionIds)
+            {
+                solutions.AddRange(await LogAnalyticsOps.ListSolutionsAsync(sub));
+            }
+
+            Solutions = solutions;
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task RunQueryAsync()
+    {
+        IsBusy = true;
+        SetStatus(T("Running query..."), error: false);
+        QueryResult = null;
+        StateHasChanged();
+
+        try
+        {
+            QueryResult = await LogAnalyticsOps.RunQueryAsync(
+                SelectedWorkspaceId, QueryText, TimeSpan.FromHours(LookbackHours));
+            SetStatus(T("Query completed: {0} rows.", QueryResult.TotalRowCount), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+}

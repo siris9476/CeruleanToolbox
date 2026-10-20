@@ -1,0 +1,16 @@
+## .NET
+bin/
+obj/
+*.user
+
+## Secrets — le credenziali reali vivono in user-secrets (fuori dal repo), mai qui
+appsettings.Local.json
+*.secrets.json
+
+## IDE
+.vs/
+.vscode/
+
+## Strumenti locali degli assistenti e dati personali
+.claude/
+*.local.json

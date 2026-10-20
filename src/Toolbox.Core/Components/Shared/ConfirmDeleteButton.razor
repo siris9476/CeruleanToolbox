@@ -1,0 +1,58 @@
+@* Azure-portal-style destructive-action confirm: click reveals a text box that must be typed
+   to exactly match ConfirmText before the actual delete button becomes clickable. *@
+
+@if (_expanded)
+{
+    <span class="d-inline-flex align-items-center gap-1">
+        <input class="form-control form-control-sm" style="width: 11rem; display: inline-block;"
+               placeholder='@T("Type {0}", ConfirmText)' value="@_typed" disabled="@IsBusy"
+               @oninput="OnInput" />
+        <button class="btn btn-sm btn-danger" disabled="@(IsBusy || _typed != ConfirmText)" @onclick="ConfirmAsync">
+            @ConfirmLabel
+        </button>
+        <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" @onclick="Cancel">@T("Cancel")</button>
+    </span>
+}
+else
+{
+    <button class="btn btn-sm btn-outline-danger" disabled="@IsBusy" @onclick="Start">@ButtonLabel</button>
+}
+
+@code {
+    [Parameter, EditorRequired] public string ConfirmText { get; set; } = "";
+    [Parameter] public string ButtonLabel { get; set; } = T("Delete");
+    [Parameter] public string ConfirmLabel { get; set; } = T("Confirm deletion");
+    [Parameter] public bool IsBusy { get; set; }
+    [Parameter, EditorRequired] public EventCallback OnConfirmed { get; set; }
+
+    private bool _expanded;
+    private string _typed = "";
+
+    private void Start()
+    {
+        _expanded = true;
+        _typed = "";
+    }
+
+    private void Cancel()
+    {
+        _expanded = false;
+        _typed = "";
+    }
+
+    private void OnInput(ChangeEventArgs e)
+    {
+        _typed = e.Value?.ToString() ?? "";
+    }
+
+    private async Task ConfirmAsync()
+    {
+        // Defense in depth: the button is already disabled unless this holds, but re-check
+        // here too since a disabled attribute is a browser-side hint, not a server-side guarantee.
+        if (_typed != ConfirmText || IsBusy) return;
+
+        _expanded = false;
+        _typed = "";
+        await OnConfirmed.InvokeAsync();
+    }
+}

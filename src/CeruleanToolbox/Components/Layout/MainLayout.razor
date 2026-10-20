@@ -1,0 +1,48 @@
+@inherits LayoutComponentBase
+@using CeruleanToolbox.Services
+@inject ConnectionManagerService Connections
+@implements IDisposable
+
+<div class="page">
+    <div class="sidebar">
+        <NavMenu />
+    </div>
+
+    <main>
+        <div class="top-row px-4">
+            <LanguageSwitch />
+            @if (Active is { } active)
+            {
+                <a href="connections" class="text-decoration-none" title="@T("Tenant {0}\nClient {1}\nClick to manage connections", active.TenantId, active.ClientId)">
+                    @T("Active connection:") <strong>@active.Name</strong>
+                </a>
+            }
+            else
+            {
+                <a href="connections" class="text-decoration-none">@T("No connection: set one up")</a>
+            }
+        </div>
+
+        <article class="content px-4">
+            @Body
+        </article>
+    </main>
+</div>
+
+<div id="blazor-error-ui">
+    An unhandled error has occurred.
+    <a href="" class="reload">Reload</a>
+    <a class="dismiss">🗙</a>
+</div>
+
+@code {
+    // Read on every render (the connection store reloads from disk), so a change made in the other app is picked up on the
+    // next navigation; a change made here also arrives through ActiveConnectionChanged.
+    private SavedConnection? Active => Connections.ActiveConnection;
+
+    protected override void OnInitialized() => Connections.ActiveConnectionChanged += OnActiveConnectionChanged;
+
+    private void OnActiveConnectionChanged() => _ = InvokeAsync(StateHasChanged);
+
+    public void Dispose() => Connections.ActiveConnectionChanged -= OnActiveConnectionChanged;
+}

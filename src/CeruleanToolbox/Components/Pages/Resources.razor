@@ -1,0 +1,363 @@
+@page "/resources"
+@using CeruleanToolbox.Services
+@inject ResourceInventoryService Inventory
+@inherits CeruleanToolboxPageBase
+
+<PageTitle>@T("Resources")</PageTitle>
+
+<h1>@T("Resources")</h1>
+
+<div class="row mb-3">
+    <div class="col-md-4">
+        <label class="form-label">@T("Subscription (optional)")</label>
+        <SearchableSelect TItem="SubscriptionInfo" Items="Subscriptions"
+                           GetLabel="@(s => $"{s.DisplayName} ({s.SubscriptionId})")" GetValue="@(s => s.SubscriptionId)"
+                           SelectedValue="SelectedSubscriptionId" SelectedValueChanged="OnSubscriptionChangedAsync"
+                           Placeholder='@T("-- all --")' Disabled="@IsLoading" />
+    </div>
+    <div class="col-md-4">
+        <label class="form-label">@T("Resource Group (optional)")</label>
+        <SearchableSelect TItem="ResourceGroupInfo" Items="ResourceGroups"
+                           GetLabel="@(rg => $"{rg.Name} ({rg.Location})")" GetValue="@(rg => rg.Name)"
+                           SelectedValue="SelectedResourceGroup" SelectedValueChanged="OnResourceGroupChangedAsync"
+                           Placeholder='@T("-- all resource groups --")' Disabled="@(string.IsNullOrEmpty(SelectedSubscriptionId) || IsLoading)" />
+    </div>
+</div>
+
+@if (!string.IsNullOrEmpty(StatusMessage))
+{
+    <div class="alert @(IsError ? "alert-danger" : "alert-info")">@StatusMessage</div>
+}
+
+@if (IsLoading)
+{
+    <div class="d-flex align-items-center gap-2 mb-3">
+        <div class="spinner-border spinner-border-sm text-primary" role="status" aria-hidden="true"></div>
+        <span>@T("Loading resources...")</span>
+    </div>
+}
+
+@if (string.IsNullOrEmpty(SelectedSubscriptionId) && !HasLoadedAllSubscriptions && !IsLoading)
+{
+    <div class="alert alert-secondary">
+        @T("No subscription selected: pick one for a quick view, or")
+        <button class="btn btn-sm btn-outline-primary" @onclick="LoadAllSubscriptionsAsync">@T("Load all subscriptions")</button>
+        @T("— it may take a while if you have many.")
+    </div>
+}
+
+@if ((!string.IsNullOrEmpty(SelectedSubscriptionId) || HasLoadedAllSubscriptions) && !IsLoading)
+{
+    <h3>@T("All resources")</h3>
+    <table class="table table-sm">
+        <thead>
+            <tr><th>@T("Name")</th><th>Subscription</th><th>@T("Type")</th><th>Resource Group</th><th>Location</th><th></th></tr>
+            <tr>
+                <th>
+                    <input class="form-control form-control-sm" list="res-name-list" placeholder='@T("filter...")' @bind="ResNameFilter" @bind:event="oninput" />
+                    <datalist id="res-name-list">
+                        @foreach (var v in DistinctValues(AllResources, res => res.Name))
+                        {
+                            <option value="@v" />
+                        }
+                    </datalist>
+                </th>
+                <th>
+                    <input class="form-control form-control-sm" list="res-sub-list" placeholder='@T("filter...")' @bind="ResSubscriptionFilter" @bind:event="oninput" />
+                    <datalist id="res-sub-list">
+                        @foreach (var v in DistinctValues(AllResources, res => GetSubscriptionName(res.Id)))
+                        {
+                            <option value="@v" />
+                        }
+                    </datalist>
+                </th>
+                <th>
+                    <input class="form-control form-control-sm" list="res-type-list" placeholder='@T("filter...")' @bind="ResTypeFilter" @bind:event="oninput" />
+                    <datalist id="res-type-list">
+                        @foreach (var v in DistinctValues(AllResources, res => res.ResourceType))
+                        {
+                            <option value="@v" />
+                        }
+                    </datalist>
+                </th>
+                <th>
+                    <input class="form-control form-control-sm" list="res-rg-list" placeholder='@T("filter...")' @bind="ResResourceGroupFilter" @bind:event="oninput" />
+                    <datalist id="res-rg-list">
+                        @foreach (var v in DistinctValues(AllResources, res => res.ResourceGroup))
+                        {
+                            <option value="@v" />
+                        }
+                    </datalist>
+                </th>
+                <th>
+                    <input class="form-control form-control-sm" list="res-loc-list" placeholder='@T("filter...")' @bind="ResLocationFilter" @bind:event="oninput" />
+                    <datalist id="res-loc-list">
+                        @foreach (var v in DistinctValues(AllResources, res => res.Location))
+                        {
+                            <option value="@v" />
+                        }
+                    </datalist>
+                </th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var res in FilteredAllResources)
+            {
+                <tr>
+                    <td>@res.Name</td>
+                    <td>@GetSubscriptionName(res.Id)</td>
+                    <td>@res.ResourceType</td>
+                    <td>@res.ResourceGroup</td>
+                    <td>@res.Location</td>
+                    <td>
+                        @if (OpenUrl(res) is { } url)
+                        {
+                            <a class="btn btn-sm btn-outline-primary" href="@url">@T("Open overview")</a>
+                        }
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+    <p class="text-muted">@T("Showing {0} of {1} resources.", FilteredAllResources.Count(), AllResources.Count)</p>
+}
+
+@code {
+    private List<ResourceGroupInfo> ResourceGroups { get; set; } = new();
+    private List<GenericResourceInfo> AllResources { get; set; } = new();
+
+    private string SelectedSubscriptionId { get; set; } = "";
+    private string SelectedResourceGroup { get; set; } = "";
+
+
+
+
+    private string ResNameFilter { get; set; } = "";
+    private string ResSubscriptionFilter { get; set; } = "";
+    private string ResTypeFilter { get; set; } = "";
+    private string ResResourceGroupFilter { get; set; } = "";
+    private string ResLocationFilter { get; set; } = "";
+
+
+
+
+
+    private IEnumerable<GenericResourceInfo> FilteredAllResources => AllResources.Where(res =>
+        Matches(res.Name, ResNameFilter) &&
+        Matches(GetSubscriptionName(res.Id), ResSubscriptionFilter) &&
+        Matches(res.ResourceType, ResTypeFilter) &&
+        Matches(res.ResourceGroup, ResResourceGroupFilter) &&
+        Matches(res.Location, ResLocationFilter));
+
+
+    // Resource types that have a dedicated portal-style page. Sites are sent to App Service, which
+    // forwards function apps to their own page (the inventory does not tell them apart).
+    private static readonly Dictionary<string, string> DedicatedPages = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["microsoft.compute/virtualmachines"] = "/vm",
+        ["microsoft.web/sites"] = "/appservice",
+        ["microsoft.containerservice/managedclusters"] = "/aks",
+        ["microsoft.sql/servers"] = "/sql",
+        ["microsoft.sql/servers/databases"] = "/sql",
+        ["microsoft.storage/storageaccounts"] = "/storage",
+        ["microsoft.keyvault/vaults"] = "/keyvault",
+        ["microsoft.containerregistry/registries"] = "/containerregistry",
+        ["microsoft.appconfiguration/configurationstores"] = "/appconfiguration",
+        ["microsoft.network/applicationgateways"] = "/appgateway",
+        ["microsoft.operationalinsights/workspaces"] = "/loganalytics",
+        ["microsoft.automation/automationaccounts"] = "/automation",
+        ["microsoft.insights/components"] = "/appinsights",
+        ["microsoft.network/bastionhosts"] = "/bastion",
+
+        // Pages with one tab per resource type: the page picks the tab from the id.
+        ["microsoft.network/virtualnetworks"] = "/networking",
+        ["microsoft.network/networksecuritygroups"] = "/networking",
+        ["microsoft.network/publicipaddresses"] = "/networking",
+        ["microsoft.network/loadbalancers"] = "/networking",
+        ["microsoft.network/privateendpoints"] = "/networking",
+        ["microsoft.network/networkinterfaces"] = "/networking",
+        ["microsoft.network/privatednszones"] = "/networking",
+        ["microsoft.network/trafficmanagerprofiles"] = "/networking",
+        ["microsoft.network/networkwatchers"] = "/networking",
+        ["microsoft.network/applicationgatewaywebapplicationfirewallpolicies"] = "/networking",
+        ["microsoft.cdn/profiles"] = "/networking",
+        ["microsoft.compute/virtualmachinescalesets"] = "/computeextras",
+        ["microsoft.compute/disks"] = "/computeextras",
+        ["microsoft.compute/snapshots"] = "/computeextras",
+        ["microsoft.web/serverfarms"] = "/computeextras",
+        ["microsoft.devtestlab/schedules"] = "/computeextras",
+        ["microsoft.devtestlab/labs/schedules"] = "/computeextras",
+        ["microsoft.insights/actiongroups"] = "/monitoring",
+        ["microsoft.insights/metricalerts"] = "/monitoring",
+        ["microsoft.insights/datacollectionrules"] = "/monitoring",
+        ["microsoft.insights/webtests"] = "/monitoring",
+        ["microsoft.insights/workbooks"] = "/monitoring",
+        ["microsoft.alertsmanagement/smartdetectoralertrules"] = "/monitoring",
+        ["microsoft.security/automations"] = "/monitoring",
+        ["microsoft.managedidentity/userassignedidentities"] = "/identity",
+        ["microsoft.azureactivedirectory/b2cdirectories"] = "/identity",
+    };
+
+    private static string? OpenUrl(GenericResourceInfo resource)
+    {
+        if (!DedicatedPages.TryGetValue(resource.ResourceType, out var page)) return null;
+
+        // A SQL database opens its server, which is where the database list lives.
+        var id = resource.ResourceType.Equals("microsoft.sql/servers/databases", StringComparison.OrdinalIgnoreCase)
+            ? resource.Id[..resource.Id.IndexOf("/databases/", StringComparison.OrdinalIgnoreCase)]
+            : resource.Id;
+        return $"{page}?open={Uri.EscapeDataString(id)}";
+    }
+
+    private static bool Matches(string value, string filter) =>
+        string.IsNullOrEmpty(filter) || value.Contains(filter, StringComparison.OrdinalIgnoreCase);
+
+    // Azure resource type casing is inconsistent across providers/resources (e.g.
+    // "Microsoft.Compute/..." vs "microsoft.compute/..." for the same type), so distinct
+    // values are deduplicated case-insensitively to avoid showing duplicate-looking entries.
+    private static List<string> DistinctValues<T>(IEnumerable<T> source, Func<T, string> selector) =>
+        source.Select(selector)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(v => v, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+    // Every list item carries its full ARM resource ID, which already embeds the subscription —
+    // reusing it here avoids threading a subscription name through every service method.
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            Subscriptions = await Inventory.ListSubscriptionsAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+    }
+
+    private async Task OnSubscriptionChangedAsync(string subscriptionId)
+    {
+        SelectedSubscriptionId = subscriptionId;
+        ResourceGroups.Clear();
+        SelectedResourceGroup = "";
+        ClearResourceLists();
+        HasLoadedAllSubscriptions = false;
+
+        // Clearing back to "all" doesn't auto-load: fetching every subscription is expensive,
+        // so it waits for the explicit button below instead of firing on every selection change.
+        if (string.IsNullOrEmpty(SelectedSubscriptionId)) return;
+
+        IsLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            ResourceGroups = await Inventory.ListResourceGroupsAsync(SelectedSubscriptionId);
+            await LoadContentsAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private async Task LoadAllSubscriptionsAsync()
+    {
+        HasLoadedAllSubscriptions = true;
+        IsLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            await LoadContentsAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private async Task OnResourceGroupChangedAsync(string resourceGroup)
+    {
+        SelectedResourceGroup = resourceGroup;
+        ClearResourceLists();
+
+        IsLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            await LoadContentsAsync();
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private async Task LoadContentsAsync()
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(SelectedSubscriptionId))
+            {
+                var resources = new List<GenericResourceInfo>();
+
+                foreach (var sub in Subscriptions)
+                {
+                    resources.AddRange(await Inventory.ListAllResourcesAsync(sub.SubscriptionId));
+                }
+
+                AllResources = resources;
+            }
+            else if (string.IsNullOrEmpty(SelectedResourceGroup))
+            {
+                AllResources = await Inventory.ListAllResourcesAsync(SelectedSubscriptionId);
+            }
+            else
+            {
+                AllResources = await Inventory.ListResourcesAsync(SelectedSubscriptionId, SelectedResourceGroup);
+            }
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+    }
+
+    private void ClearResourceLists()
+    {
+        AllResources.Clear();
+    }
+
+    private async Task RunActionAsync(string resourceId, Func<string, CancellationToken, Task> action, string verb, string resourceName)
+    {
+        IsBusy = true;
+        SetStatus(T("{0} of {1} in progress...", verb, resourceName), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await action(resourceId, CancellationToken.None);
+            SetStatus(T("Operation completed."), error: false);
+            await LoadContentsAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+}

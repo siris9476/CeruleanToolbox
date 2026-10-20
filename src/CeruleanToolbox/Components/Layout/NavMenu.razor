@@ -1,0 +1,199 @@
+@using CeruleanToolbox.Services
+@using Microsoft.Extensions.DependencyInjection
+
+<div class="top-row ps-3 navbar navbar-dark">
+    <div class="container-fluid">
+        <a class="navbar-brand" href="">CeruleanToolbox</a>
+    </div>
+</div>
+
+<input type="checkbox" title="Navigation menu" class="navbar-toggler" />
+
+<div class="nav-scrollable" onclick="document.querySelector('.navbar-toggler').click()">
+    <nav class="flex-column">
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="" Match="NavLinkMatch.All">
+                <span class="bi bi-house-door-fill-nav-menu" aria-hidden="true"></span> Home
+            </NavLink>
+        </div>
+
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="connections">
+                <span class="bi bi-plug-fill-nav-menu" aria-hidden="true"></span> @T("Connections")
+            </NavLink>
+        </div>
+
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="resources">
+                <span class="bi bi-plus-square-fill-nav-menu" aria-hidden="true"></span> @T("Resources")
+            </NavLink>
+        </div>
+
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="vm">
+                <span class="bi bi-pc-display-nav-menu" aria-hidden="true"></span> Virtual Machine
+            </NavLink>
+        </div>
+
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="appservice">
+                <span class="bi bi-window-stack-nav-menu" aria-hidden="true"></span> App Service
+            </NavLink>
+        </div>
+
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="appgateway">
+                <span class="bi bi-signpost-split-fill-nav-menu" aria-hidden="true"></span> Application Gateway
+            </NavLink>
+        </div>
+
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="aks">
+                <span class="bi bi-diagram-3-fill-nav-menu" aria-hidden="true"></span> AKS
+            </NavLink>
+        </div>
+
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="deploy">
+                <span class="bi bi-cloud-upload-fill-nav-menu" aria-hidden="true"></span> Deploy
+            </NavLink>
+        </div>
+
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="query">
+                <span class="bi bi-search-nav-menu" aria-hidden="true"></span> Query
+            </NavLink>
+        </div>
+
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="roles">
+                <span class="bi bi-people-fill-nav-menu" aria-hidden="true"></span> @T("Roles")
+            </NavLink>
+        </div>
+
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="keyvault">
+                <span class="bi bi-key-fill-nav-menu" aria-hidden="true"></span> Key Vault
+            </NavLink>
+        </div>
+
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="functions">
+                <span class="bi bi-lightning-charge-fill-nav-menu" aria-hidden="true"></span> Function Apps
+            </NavLink>
+        </div>
+
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="sql">
+                <span class="bi bi-database-fill-nav-menu" aria-hidden="true"></span> SQL
+            </NavLink>
+        </div>
+
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="storage">
+                <span class="bi bi-hdd-stack-fill-nav-menu" aria-hidden="true"></span> Storage
+            </NavLink>
+        </div>
+
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="appinsights">
+                <span class="bi bi-bar-chart-line-fill-nav-menu" aria-hidden="true"></span> App Insights
+            </NavLink>
+        </div>
+
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="bastion">
+                <span class="bi bi-shield-lock-fill-nav-menu" aria-hidden="true"></span> Bastion
+            </NavLink>
+        </div>
+
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="loganalytics">
+                <span class="bi bi-journal-text-nav-menu" aria-hidden="true"></span> Log Analytics
+            </NavLink>
+        </div>
+
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="automation">
+                <span class="bi bi-gear-fill-nav-menu" aria-hidden="true"></span> Automation
+            </NavLink>
+        </div>
+
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="containerregistry">
+                <span class="bi bi-boxes-nav-menu" aria-hidden="true"></span> Container Registry
+            </NavLink>
+        </div>
+
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="appconfiguration">
+                <span class="bi bi-sliders-nav-menu" aria-hidden="true"></span> App Configuration
+            </NavLink>
+        </div>
+
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="console">
+                <span class="bi bi-hdd-network-fill-nav-menu" aria-hidden="true"></span> @T("PowerShell Console")
+            </NavLink>
+        </div>
+
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="networking">
+                <span class="bi bi-hdd-network-fill-nav-menu" aria-hidden="true"></span> Networking
+            </NavLink>
+        </div>
+
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="computeextras">
+                <span class="bi bi-cpu-fill-nav-menu" aria-hidden="true"></span> Compute Extra
+            </NavLink>
+        </div>
+
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="monitoring">
+                <span class="bi bi-activity-nav-menu" aria-hidden="true"></span> Monitoring
+            </NavLink>
+        </div>
+
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="identity">
+                <span class="bi bi-person-vcard-fill-nav-menu" aria-hidden="true"></span> Identity
+            </NavLink>
+        </div>
+
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="activity">
+                <span class="bi bi-activity-nav-menu" aria-hidden="true"></span> @T("Activity log")
+            </NavLink>
+        </div>
+
+        @if (AppLog is not null)
+        {
+            <div class="nav-item px-3">
+                <a class="nav-link" href="" title="@AppLog.LogFilePath" @onclick="OpenLog" @onclick:preventDefault="true">
+                    <span class="bi bi-file-text-fill-nav-menu" aria-hidden="true"></span> @T("Error log")
+                </a>
+            </div>
+        }
+
+    </nav>
+</div>
+
+@code {
+    [Inject] private IServiceProvider Services { get; set; } = default!;
+
+    // Registered only by the desktop shell: the web app has no local log file, so the entry stays hidden there.
+    private IAppLogService? AppLog => Services.GetService<IAppLogService>();
+
+    private void OpenLog()
+    {
+        try
+        {
+            AppLog?.Open();
+        }
+        catch (Exception ex) when (ex is IOException or System.ComponentModel.Win32Exception or InvalidOperationException)
+        {
+            // the shell could not open the file: nothing useful to do from a menu click
+        }
+    }
+}

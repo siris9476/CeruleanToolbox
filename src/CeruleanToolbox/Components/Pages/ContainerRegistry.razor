@@ -1,0 +1,569 @@
+@page "/containerregistry"
+@using CeruleanToolbox.Services
+@inject ResourceInventoryService Inventory
+@inject ContainerRegistryService AcrOps
+@inherits CeruleanToolboxPageBase
+
+<PageTitle>Container Registry</PageTitle>
+
+<h1>Container Registry</h1>
+
+@if (SelectedRegistry is null)
+{
+    <p>
+        @T("Lists Azure container registries. Click a registry name, or double-click its row, to open its overview, admin credentials and repositories.")
+    </p>
+
+    <div class="row mb-3">
+        <div class="col-md-6">
+            <label class="form-label">@T("Subscription (optional)")</label>
+            <SearchableSelect TItem="SubscriptionInfo" Items="Subscriptions"
+                               GetLabel="@(s => $"{s.DisplayName} ({s.SubscriptionId})")" GetValue="@(s => s.SubscriptionId)"
+                               SelectedValue="SelectedSubscriptionId" SelectedValueChanged="OnSubscriptionChangedAsync"
+                               Placeholder='@T("-- all --")' Disabled="@(IsLoading || IsBusy)" />
+        </div>
+        <div class="col-md-4">
+            <label class="form-label">@T("Filter by name")</label>
+            <input class="form-control" placeholder='@T("filter...")' @bind="NameFilter" @bind:event="oninput" />
+        </div>
+    </div>
+}
+
+@if (!string.IsNullOrEmpty(StatusMessage))
+{
+    <div class="alert @(IsError ? "alert-danger" : "alert-info")">@StatusMessage</div>
+}
+
+@if (SelectedRegistry is null)
+{
+    @if (string.IsNullOrEmpty(SelectedSubscriptionId) && !HasLoadedAllSubscriptions && !IsLoading)
+    {
+        <div class="alert alert-secondary">
+            @T("No subscription selected: pick one for a quick view, or")
+            <button class="btn btn-sm btn-outline-primary" @onclick="LoadAllSubscriptionsAsync">@T("Load all subscriptions")</button>
+            @T("— this can take a while if you have many.")
+        </div>
+    }
+
+    @if (IsLoading)
+    {
+        <div class="d-flex align-items-center gap-2 mb-3">
+            <div class="spinner-border spinner-border-sm text-primary" role="status" aria-hidden="true"></div>
+            <span>@T("Loading...")</span>
+        </div>
+    }
+
+    @if (!IsLoading && (!string.IsNullOrEmpty(SelectedSubscriptionId) || HasLoadedAllSubscriptions))
+    {
+        @if (!FilteredRegistries.Any())
+        {
+            <p><em>@T("No container registries found.")</em></p>
+        }
+        else
+        {
+            <table class="table table-sm table-hover align-middle">
+                <thead>
+                    <tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>Login Server</th><th>SKU</th><th>Admin User</th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var registry in FilteredRegistries)
+                    {
+                        <tr style="cursor: pointer;" title='@T("Double-click to open the registry")' @ondblclick="() => OpenRegistryAsync(registry)">
+                            <td>
+                                <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenRegistryAsync(registry)">
+                                    @registry.Name <span aria-hidden="true">&rsaquo;</span>
+                                </button>
+                            </td>
+                            <td>@GetSubscriptionName(registry.Id)</td>
+                            <td>@registry.ResourceGroup</td>
+                            <td>@registry.LoginServer</td>
+                            <td>@registry.Sku</td>
+                            <td>@(registry.AdminUserEnabled ? T("Enabled") : T("Disabled"))</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+    }
+}
+else
+{
+    <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
+        <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" @onclick="CloseRegistry">&larr; Container Registry</button>
+        <h4 class="mb-0">@SelectedRegistry.Name</h4>
+        @if (Overview is not null)
+        {
+            <span class="badge bg-secondary">@Overview.Status</span>
+        }
+        <button class="btn btn-sm btn-outline-secondary ms-auto" disabled="@IsBusy" @onclick="RefreshRegistryAsync">@T("Refresh")</button>
+    </div>
+    <p class="text-muted small">
+        @GetSubscriptionName(SelectedRegistry.Id) · Resource group @SelectedRegistry.ResourceGroup · @SelectedRegistry.Location
+    </p>
+
+    <ul class="nav nav-tabs mb-3">
+        <li class="nav-item"><button class="nav-link @(ActiveTab == "overview" ? "active" : "")" @onclick='() => ActiveTab = "overview"'>@T("Overview")</button></li>
+        <li class="nav-item"><button class="nav-link @(ActiveTab == "repos" ? "active" : "")" @onclick='() => ActiveTab = "repos"'>@T("Credentials and repositories")</button></li>
+    </ul>
+
+    @if (ActiveTab == "overview" && Overview is not null)
+    {
+        <ResourceOverviewView Overview="Overview" />
+    }
+    else if (ActiveTab == "repos")
+    {
+        <p class="text-muted small">
+            @T("Reading repositories and tags uses the registry's own Docker Registry v2 API (not covered by the ARM SDK, which only manages the resource) and authenticates with the admin credentials: the Admin User must therefore be enabled on the registry.")
+        </p>
+        <h3 class="mt-3">@T("Admin credentials")</h3>
+        @if (!SelectedRegistry.AdminUserEnabled)
+        {
+            <div class="alert alert-warning">
+                @T("Admin User is disabled on this registry: without admin credentials this page cannot read repositories/tags (an AAD token exchange against RBAC permissions on the registry would be needed instead, not implemented here).")
+                <button class="btn btn-sm btn-outline-primary ms-2" disabled="@IsBusy" @onclick="EnableAdminUserAsync">@T("Enable Admin User")</button>
+            </div>
+        }
+        else
+        {
+            <div class="mb-3">
+                <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" @onclick="ToggleCredentialsAsync">
+                    @(Credentials is not null ? T("Hide credentials") : T("Show credentials"))
+                </button>
+            </div>
+            @if (Credentials is not null)
+            {
+                <table class="table table-sm">
+                    <thead><tr><th>@T("Field")</th><th>@T("Value")</th><th></th></tr></thead>
+                    <tbody>
+                        <tr><td>Username</td><td><code>@Credentials.Username</code></td><td></td></tr>
+                        @foreach (var pwd in Credentials.Passwords)
+                        {
+                            <tr>
+                                <td>@pwd.Name</td>
+                                <td><code>@pwd.Value</code></td>
+                                <td>
+                                    <button class="btn btn-sm btn-outline-danger" disabled="@IsBusy" @onclick="() => RegenerateCredentialAsync(pwd.Name)">@T("Regenerate")</button>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+
+                <h3 class="mt-3">Repository</h3>
+                @if (Repositories is null)
+                {
+                    <button class="btn btn-sm btn-outline-primary" disabled="@IsBusy" @onclick="LoadRepositoriesAsync">@T("Load repositories")</button>
+                }
+                else if (Repositories.Count == 0)
+                {
+                    <p><em>@T("No repositories found.")</em></p>
+                }
+                else
+                {
+                    <table class="table table-sm">
+                        <thead><tr><th>@T("Name")</th><th></th></tr></thead>
+                        <tbody>
+                            @foreach (var repo in Repositories)
+                            {
+                                <tr class="@(SelectedRepository == repo ? "table-success" : "")" @key="repo">
+                                    <td>@repo</td>
+                                    <td>
+                                        <button class="btn btn-sm btn-outline-primary" disabled="@IsBusy" @onclick="() => LoadTagsAsync(repo)">@T("Show tags")</button>
+                                        <ConfirmDeleteButton ConfirmText="@repo" ButtonLabel='@T("Delete repository")' IsBusy="IsBusy"
+                                                              OnConfirmed="() => DeleteRepositoryAsync(repo)" />
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                }
+
+                @if (SelectedRepository is not null && Tags is not null)
+                {
+                    <h4>@T("Tags of") <code>@SelectedRepository</code></h4>
+                    @if (Tags.Count == 0)
+                    {
+                        <p><em>@T("No tags found.")</em></p>
+                    }
+                    else
+                    {
+                        <table class="table table-sm">
+                            <thead><tr><th>Tag</th><th></th></tr></thead>
+                            <tbody>
+                                @foreach (var tag in Tags)
+                                {
+                                    <tr @key="tag">
+                                        <td><code>@SelectedRegistry.LoginServer/@SelectedRepository:@tag</code></td>
+                                        <td>
+                                            <ConfirmDeleteButton ConfirmText="@tag" ButtonLabel='@T("Delete tag")' IsBusy="IsBusy"
+                                                                  OnConfirmed="() => DeleteTagAsync(tag)" />
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    }
+                }
+            }
+        }
+
+    }
+}
+
+@code {
+    private List<AcrRegistryInfo> Registries { get; set; } = new();
+    private AcrCredentialsInfo? Credentials { get; set; }
+    private List<string>? Repositories { get; set; }
+    private List<string>? Tags { get; set; }
+
+    private string SelectedSubscriptionId { get; set; } = "";
+    private string SelectedRegistryId { get; set; } = "";
+    private string? SelectedRepository { get; set; }
+    private string NameFilter { get; set; } = "";
+    private ResourceOverview? Overview { get; set; }
+    private string ActiveTab { get; set; } = "overview";
+
+    private IEnumerable<AcrRegistryInfo> FilteredRegistries => Registries.Where(r =>
+        string.IsNullOrWhiteSpace(NameFilter) || r.Name.Contains(NameFilter, StringComparison.OrdinalIgnoreCase));
+
+    private AcrRegistryInfo? SelectedRegistry =>
+        Registries.FirstOrDefault(r => r.Id == SelectedRegistryId);
+
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            Subscriptions = await Inventory.ListSubscriptionsAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+
+        await AutoOpenAsync();
+    }
+
+    private async Task AutoOpenAsync()
+    {
+        var id = RequestedResourceId;
+        if (id is null || Subscriptions.Count == 0) return;
+
+        await OnSubscriptionChangedAsync(RequestedSubscriptionId ?? "");
+        var item = Registries.FirstOrDefault(x => string.Equals(x.Id, id, StringComparison.OrdinalIgnoreCase));
+        if (item is not null)
+        {
+            await OpenRegistryAsync(item);
+        }
+    }
+
+    private async Task OnSubscriptionChangedAsync(string subscriptionId)
+    {
+        SelectedSubscriptionId = subscriptionId;
+        Registries.Clear();
+        ClearSelectedRegistry();
+        HasLoadedAllSubscriptions = false;
+
+        // Clearing back to "all" doesn't auto-load: fetching every subscription is expensive,
+        // so it waits for the explicit button below instead of firing on every selection change.
+        if (string.IsNullOrEmpty(SelectedSubscriptionId)) return;
+
+        IsLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            Registries = await AcrOps.ListAllAsync(SelectedSubscriptionId);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private async Task LoadAllSubscriptionsAsync()
+    {
+        HasLoadedAllSubscriptions = true;
+        IsLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            var registries = new List<AcrRegistryInfo>();
+            foreach (var sub in Subscriptions)
+            {
+                registries.AddRange(await AcrOps.ListAllAsync(sub.SubscriptionId));
+            }
+
+            Registries = registries;
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private void ClearSelectedRegistry()
+    {
+        SelectedRegistryId = "";
+        Overview = null;
+        Credentials = null;
+        Repositories = null;
+        Tags = null;
+        SelectedRepository = null;
+    }
+
+    private async Task OpenRegistryAsync(AcrRegistryInfo registry)
+    {
+        if (IsBusy) return;
+
+        IsBusy = true;
+        SetStatus(T("Opening {0}...", registry.Name), error: false);
+        StateHasChanged();
+
+        try
+        {
+            Overview = await AcrOps.GetOverviewAsync(registry.Id);
+            SelectedRegistryId = registry.Id;
+            ActiveTab = "overview";
+            Credentials = null;
+            Repositories = null;
+            Tags = null;
+            SelectedRepository = null;
+            SetStatus("", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private void CloseRegistry()
+    {
+        ClearSelectedRegistry();
+        SetStatus("", error: false);
+    }
+
+    private async Task RefreshRegistryAsync()
+    {
+        if (IsBusy || SelectedRegistry is null) return;
+
+        IsBusy = true;
+        StateHasChanged();
+
+        try
+        {
+            Overview = await AcrOps.GetOverviewAsync(SelectedRegistry.Id);
+            SetStatus("", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task EnableAdminUserAsync()
+    {
+        IsBusy = true;
+        SetStatus(T("Enabling Admin User..."), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await AcrOps.SetAdminUserEnabledAsync(SelectedRegistryId, enabled: true);
+            var index = Registries.FindIndex(r => r.Id == SelectedRegistryId);
+            Registries[index] = Registries[index] with { AdminUserEnabled = true };
+            SetStatus(T("Admin User enabled."), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task ToggleCredentialsAsync()
+    {
+        if (Credentials is not null)
+        {
+            Credentials = null;
+            Repositories = null;
+            Tags = null;
+            SelectedRepository = null;
+            return;
+        }
+
+        IsBusy = true;
+        SetStatus(T("Retrieving credentials..."), error: false);
+        StateHasChanged();
+
+        try
+        {
+            Credentials = await AcrOps.GetCredentialsAsync(SelectedRegistryId);
+            SetStatus("", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task RegenerateCredentialAsync(string passwordName)
+    {
+        IsBusy = true;
+        SetStatus(T("Regenerating \"{0}\"...", passwordName), error: false);
+        StateHasChanged();
+
+        try
+        {
+            Credentials = await AcrOps.RegenerateCredentialAsync(SelectedRegistryId, passwordName);
+            SetStatus(T("\"{0}\" regenerated.", passwordName), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task LoadRepositoriesAsync()
+    {
+        if (Credentials is null || SelectedRegistry is null) return;
+
+        IsBusy = true;
+        SetStatus(T("Loading repositories..."), error: false);
+        StateHasChanged();
+
+        try
+        {
+            Repositories = await AcrOps.ListRepositoriesAsync(
+                SelectedRegistry.LoginServer, Credentials.Username, Credentials.Passwords[0].Value);
+            SetStatus("", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task LoadTagsAsync(string repository)
+    {
+        if (Credentials is null || SelectedRegistry is null) return;
+
+        SelectedRepository = repository;
+        IsBusy = true;
+        SetStatus(T("Loading tags of \"{0}\"...", repository), error: false);
+        StateHasChanged();
+
+        try
+        {
+            Tags = await AcrOps.ListTagsAsync(
+                SelectedRegistry.LoginServer, Credentials.Username, Credentials.Passwords[0].Value, repository);
+            SetStatus("", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task DeleteTagAsync(string tag)
+    {
+        if (Credentials is null || SelectedRegistry is null || SelectedRepository is null) return;
+
+        // Guards against a double-click firing this twice before the "disabled" attribute
+        // re-renders in the browser: Blazor Server processes UI events one at a time per
+        // circuit, so this in-memory check is enough to make the second click a no-op.
+        if (IsBusy) return;
+
+        IsBusy = true;
+        SetStatus(T("Deleting tag \"{0}\"...", tag), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await AcrOps.DeleteTagAsync(
+                SelectedRegistry.LoginServer, Credentials.Username, Credentials.Passwords[0].Value, SelectedRepository, tag);
+            Tags = await AcrOps.ListTagsAsync(
+                SelectedRegistry.LoginServer, Credentials.Username, Credentials.Passwords[0].Value, SelectedRepository);
+            SetStatus(T("Tag \"{0}\" deleted.", tag), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task DeleteRepositoryAsync(string repository)
+    {
+        if (Credentials is null || SelectedRegistry is null) return;
+
+        // Guards against a double-click firing this twice before the "disabled" attribute
+        // re-renders in the browser: Blazor Server processes UI events one at a time per
+        // circuit, so this in-memory check is enough to make the second click a no-op.
+        if (IsBusy) return;
+
+        IsBusy = true;
+        SetStatus(T("Deleting repository \"{0}\"...", repository), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await AcrOps.DeleteRepositoryAsync(SelectedRegistry.LoginServer, Credentials.Username, Credentials.Passwords[0].Value, repository);
+            Repositories = await AcrOps.ListRepositoriesAsync(SelectedRegistry.LoginServer, Credentials.Username, Credentials.Passwords[0].Value);
+            if (SelectedRepository == repository)
+            {
+                SelectedRepository = null;
+                Tags = null;
+            }
+
+            SetStatus(T("Repository \"{0}\" deleted.", repository), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+}

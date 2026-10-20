@@ -1,0 +1,621 @@
+@page "/aks"
+@using CeruleanToolbox.Services
+@inject ResourceInventoryService Inventory
+@inject AksClusterService AksOps
+@inherits CeruleanToolboxPageBase
+
+<PageTitle>AKS</PageTitle>
+
+<h1>AKS (Kubernetes)</h1>
+
+@if (SelectedCluster is null)
+{
+    <p>
+        @T("Lists the AKS clusters. Click a cluster name, or double-click its row, to open its overview, node pools and nodes.")
+    </p>
+
+    <div class="row mb-3">
+        <div class="col-md-6">
+            <label class="form-label">@T("Subscription (optional)")</label>
+            <SearchableSelect TItem="SubscriptionInfo" Items="Subscriptions"
+                               GetLabel="@(s => $"{s.DisplayName} ({s.SubscriptionId})")" GetValue="@(s => s.SubscriptionId)"
+                               SelectedValue="SelectedSubscriptionId" SelectedValueChanged="OnSubscriptionChangedAsync"
+                               Placeholder='@T("-- all --")' Disabled="@(IsLoading || IsBusy)" />
+        </div>
+        <div class="col-md-4">
+            <label class="form-label">@T("Filter by name")</label>
+            <input class="form-control" placeholder='@T("filter...")' @bind="NameFilter" @bind:event="oninput" />
+        </div>
+    </div>
+}
+
+@if (!string.IsNullOrEmpty(StatusMessage))
+{
+    <div class="alert @(IsError ? "alert-danger" : "alert-info")">@StatusMessage</div>
+}
+
+@if (SelectedCluster is null)
+{
+    @if (string.IsNullOrEmpty(SelectedSubscriptionId) && !HasLoadedAllSubscriptions && !IsLoading)
+    {
+        <div class="alert alert-secondary">
+            @T("No subscription selected: pick one for a quick view, or")
+            <button class="btn btn-sm btn-outline-primary" @onclick="LoadAllSubscriptionsAsync">@T("Load all subscriptions")</button>
+            @T("— this can take a while if you have many.")
+        </div>
+    }
+
+    @if (IsLoading)
+    {
+        <div class="d-flex align-items-center gap-2 mb-3">
+            <div class="spinner-border spinner-border-sm text-primary" role="status" aria-hidden="true"></div>
+            <span>@T("Loading...")</span>
+        </div>
+    }
+
+    @if (!IsLoading && (!string.IsNullOrEmpty(SelectedSubscriptionId) || HasLoadedAllSubscriptions))
+    {
+        @if (!FilteredClusters.Any())
+        {
+            <p><em>@T("No AKS clusters found.")</em></p>
+        }
+        else
+        {
+            <table class="table table-sm table-hover align-middle">
+                <thead>
+                    <tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>Location</th><th>@T("Status")</th><th>@T("Actions")</th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var cluster in FilteredClusters)
+                    {
+                        <tr style="cursor: pointer;" title='@T("Double-click to open the cluster")' @ondblclick="() => OpenClusterAsync(cluster)">
+                            <td>
+                                <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenClusterAsync(cluster)">
+                                    @cluster.Name <span aria-hidden="true">&rsaquo;</span>
+                                </button>
+                            </td>
+                            <td>@GetSubscriptionName(cluster.Id)</td>
+                            <td>@cluster.ResourceGroup</td>
+                            <td>@cluster.Location</td>
+                            <td>@cluster.PowerState</td>
+                            <td @ondblclick:stopPropagation="true">
+                                <button class="btn btn-sm btn-success" disabled="@IsBusy" @onclick="() => StartAsync(cluster)">Start</button>
+                                <button class="btn btn-sm btn-warning" disabled="@IsBusy" @onclick="() => StopAsync(cluster)">Stop</button>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+    }
+}
+else
+{
+    <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
+        <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" @onclick="CloseCluster">&larr; Cluster</button>
+        <h4 class="mb-0">@SelectedCluster.Name</h4>
+        @if (Overview is not null)
+        {
+            <span class="badge bg-secondary">@Overview.PowerState</span>
+        }
+        <div class="ms-auto d-flex gap-1">
+            <button class="btn btn-sm btn-success" disabled="@IsBusy" @onclick="() => StartAsync(SelectedCluster)">Start</button>
+            <button class="btn btn-sm btn-warning" disabled="@IsBusy" @onclick="() => StopAsync(SelectedCluster)">Stop</button>
+            <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" @onclick="RefreshClusterAsync">@T("Refresh")</button>
+        </div>
+    </div>
+    <p class="text-muted small">
+        @GetSubscriptionName(SelectedCluster.Id) · Resource group @SelectedCluster.ResourceGroup · @SelectedCluster.Location
+    </p>
+
+    <ul class="nav nav-tabs mb-3">
+        <li class="nav-item">
+            <button class="nav-link @(ActiveTab == "overview" ? "active" : "")" disabled="@IsBusy" @onclick='() => SelectTabAsync("overview")'>@T("Overview")</button>
+        </li>
+        <li class="nav-item">
+            <button class="nav-link @(ActiveTab == "pools" ? "active" : "")" disabled="@IsBusy" @onclick='() => SelectTabAsync("pools")'>Node pool</button>
+        </li>
+    </ul>
+
+    @if (ActiveTab == "overview" && Overview is not null)
+    {
+        <div class="row">
+            @foreach (var group in Overview.Sections)
+            {
+                <div class="col-md-6 mb-3">
+                    <h6>@group.Title</h6>
+                    <dl class="row small mb-0">
+                        @foreach (var item in group.Items)
+                        {
+                            <dt class="col-5">@item.Key</dt>
+                            <dd class="col-7 text-break">@item.Value</dd>
+                        }
+                    </dl>
+                </div>
+            }
+        </div>
+
+        @if (Overview.Tags.Count > 0)
+        {
+            <h6>Tag</h6>
+            <p>
+                @foreach (var tag in Overview.Tags)
+                {
+                    <span class="badge bg-light text-dark border me-1">@tag.Key: @tag.Value</span>
+                }
+            </p>
+        }
+
+        <hr />
+        <h6>@T("Cluster upgrade")</h6>
+        <p class="small mb-2">
+            @T("Current control plane version:") <strong>@CurrentVersion</strong>. @T("Node pool upgrades are done from the Node pool tab, in each pool's detail.")
+        </p>
+        @if (Overview.ProvisioningState != "Succeeded")
+        {
+            <div class="alert alert-warning small py-2">
+                @T("The cluster is in state") <strong>@Overview.ProvisioningState</strong>: @T("upgrade is disabled until the current operation finishes. Use Refresh to check the status.")
+            </div>
+        }
+        @if (UpgradeVersions.Count == 0)
+        {
+            <span class="text-muted">@T("No upgrade available.")</span>
+        }
+        else
+        {
+            <select class="form-select form-select-sm d-inline-block w-auto" disabled="@(IsBusy || Overview.ProvisioningState != "Succeeded")"
+                    @onchange="e => UpgradeTarget = e.Value?.ToString() ?? string.Empty">
+                @foreach (var v in UpgradeVersions)
+                {
+                    <option value="@v" selected="@(v == UpgradeTarget)">@v</option>
+                }
+            </select>
+            @if (!string.IsNullOrEmpty(UpgradeTarget))
+            {
+                <span class="ms-2">
+                    <ConfirmDeleteButton ConfirmText="@SelectedCluster.Name" ButtonLabel='@T("Apply upgrade")'
+                                         ConfirmLabel='@T("Confirm upgrade")' IsBusy="@(IsBusy || Overview.ProvisioningState != "Succeeded")"
+                                         OnConfirmed="ApplyUpgradeAsync" />
+                </span>
+            }
+        }
+    }
+    else if (ActiveTab == "pools" && NodePools is not null)
+    {
+        @if (SelectedPool is null)
+        {
+            <table class="table table-sm table-hover">
+                <thead>
+                    <tr>
+                        <th>@T("Name")</th><th>Provisioning</th><th>Power state</th><th>@T("Mode")</th><th>OS</th>
+                        <th>@T("Kubernetes version")</th><th>@T("Node image")</th><th>@T("Nodes")</th><th>@T("VM size")</th>
+                        <th>Scaling</th><th>@T("Zones")</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var pool in NodePools)
+                    {
+                        <tr style="cursor: pointer;" title='@T("Double-click to open the pool")' @ondblclick="() => SelectPool(pool.Name)">
+                            <td>
+                                <button class="btn btn-link btn-sm p-0 fw-semibold text-decoration-none" @onclick="() => SelectPool(pool.Name)">
+                                    @pool.Name <span aria-hidden="true">&rsaquo;</span>
+                                </button>
+                            </td>
+                            <td>@pool.ProvisioningState</td>
+                            <td>@pool.PowerState</td>
+                            <td>@pool.Mode</td>
+                            <td>@pool.OsType (@pool.OsSku)</td>
+                            <td>@pool.KubernetesVersion</td>
+                            <td class="small">@pool.NodeImageVersion</td>
+                            <td>@pool.Count</td>
+                            <td>@pool.VmSize</td>
+                            <td>@pool.Scaling</td>
+                            <td>@pool.Zones</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+        else
+        {
+            <button class="btn btn-sm btn-outline-secondary mb-2" @onclick="BackToPools">&larr; Node pool</button>
+            <h5>@SelectedPool.Name <span class="badge bg-secondary">@SelectedPool.Mode</span></h5>
+
+            <div class="row mb-3">
+                <div class="col-md-4">
+                    <h6>@T("General")</h6>
+                    <dl class="row small mb-0">
+                        <dt class="col-6">Provisioning</dt><dd class="col-6">@SelectedPool.ProvisioningState</dd>
+                        <dt class="col-6">Power state</dt><dd class="col-6">@SelectedPool.PowerState</dd>
+                        <dt class="col-6">@T("Kubernetes version")</dt><dd class="col-6">@SelectedPool.KubernetesVersion</dd>
+                        <dt class="col-6">@T("Node image")</dt><dd class="col-6">@SelectedPool.NodeImageVersion</dd>
+                        <dt class="col-6">@T("Operating system")</dt><dd class="col-6">@SelectedPool.OsType (@SelectedPool.OsSku)</dd>
+                        <dt class="col-6">@T("Priority")</dt><dd class="col-6">@SelectedPool.Priority</dd>
+                    </dl>
+                </div>
+                <div class="col-md-4">
+                    <h6>@T("Scaling and resources")</h6>
+                    <dl class="row small mb-0">
+                        <dt class="col-6">@T("VM size")</dt><dd class="col-6">@SelectedPool.VmSize</dd>
+                        <dt class="col-6">@T("Node count")</dt><dd class="col-6">@SelectedPool.Count</dd>
+                        <dt class="col-6">Scaling</dt><dd class="col-6">@SelectedPool.Scaling</dd>
+                        <dt class="col-6">@T("OS disk")</dt><dd class="col-6">@SelectedPool.OsDisk</dd>
+                        <dt class="col-6">@T("Max pods per node")</dt><dd class="col-6">@SelectedPool.MaxPods</dd>
+                        <dt class="col-6">@T("Zones")</dt><dd class="col-6">@SelectedPool.Zones</dd>
+                    </dl>
+                </div>
+                <div class="col-md-4">
+                    <h6>@T("Upgrade and network")</h6>
+                    <dl class="row small mb-0">
+                        <dt class="col-6">Max surge</dt><dd class="col-6">@SelectedPool.MaxSurge</dd>
+                        <dt class="col-6">Max unavailable</dt><dd class="col-6">@SelectedPool.MaxUnavailable</dd>
+                        <dt class="col-6">Scale-down mode</dt><dd class="col-6">@SelectedPool.ScaleDownMode</dd>
+                        <dt class="col-6">Subnet</dt><dd class="col-6">@SelectedPool.Subnet</dd>
+                        <dt class="col-6">@T("Labels")</dt><dd class="col-6">@SelectedPool.Labels</dd>
+                        <dt class="col-6">Taint</dt><dd class="col-6">@SelectedPool.Taints</dd>
+                    </dl>
+                </div>
+            </div>
+
+            <h6>@T("Actions")</h6>
+            @if (!PoolIsIdle(SelectedPool))
+            {
+                <div class="alert alert-warning small py-2">
+                    @T("The pool is in state") <strong>@SelectedPool.ProvisioningState</strong>: @T("scale and upgrade are disabled until the current operation finishes. Use Refresh to check the status.")
+                </div>
+            }
+            <div class="row g-3 mb-3">
+                <div class="col-md-6">
+                    <label class="form-label small mb-1">@T("Number of nodes")</label>
+                    @if (SelectedPool.AutoScaling)
+                    {
+                        <div class="small text-muted">@T("Automatic scaling is on ({0}): the number of nodes is managed by the autoscaler.", SelectedPool.Scaling)</div>
+                    }
+                    else
+                    {
+                        <input type="number" min="@(SelectedPool.Mode == "System" ? 1 : 0)" class="form-control form-control-sm d-inline-block w-auto"
+                               @bind="PoolScaleTarget" @bind:event="oninput" disabled="@(IsBusy || !PoolIsIdle(SelectedPool))" />
+                        @if (PoolScaleTarget != SelectedPool.Count && PoolScaleTarget >= (SelectedPool.Mode == "System" ? 1 : 0))
+                        {
+                            <span class="ms-2">
+                                <ConfirmDeleteButton ConfirmText="@SelectedPool.Name" ButtonLabel='@T("Apply scale")'
+                                                     ConfirmLabel='@T("Confirm scale")' IsBusy="@(IsBusy || !PoolIsIdle(SelectedPool))"
+                                                     OnConfirmed="() => ScalePoolAsync(SelectedPool)" />
+                            </span>
+                        }
+                        @if (SelectedPool.Mode == "System")
+                        {
+                            <div class="form-text">@T("A System pool must have at least 1 node.")</div>
+                        }
+                    }
+                </div>
+                <div class="col-md-6">
+                    <label class="form-label small mb-1">@T("Kubernetes version upgrade (current {0})", SelectedPool.KubernetesVersion)</label>
+                    @if (SelectedPool.AvailableVersions.Count == 0)
+                    {
+                        <div class="small text-muted">@T("No upgrade available for this pool.")</div>
+                    }
+                    else
+                    {
+                        <select class="form-select form-select-sm d-inline-block w-auto" disabled="@(IsBusy || !PoolIsIdle(SelectedPool))"
+                                @onchange="e => PoolUpgradeTarget = e.Value?.ToString() ?? string.Empty">
+                            @foreach (var v in SelectedPool.AvailableVersions)
+                            {
+                                <option value="@v" selected="@(v == PoolUpgradeTarget)">@v</option>
+                            }
+                        </select>
+                        <span class="ms-2">
+                            <ConfirmDeleteButton ConfirmText="@SelectedPool.Name" ButtonLabel='@T("Apply upgrade")'
+                                                 ConfirmLabel='@T("Confirm upgrade")' IsBusy="@(IsBusy || !PoolIsIdle(SelectedPool))"
+                                                 OnConfirmed="() => UpgradePoolAsync(SelectedPool)" />
+                        </span>
+                    }
+                </div>
+            </div>
+
+            <h6>@T("Nodes ({0})", SelectedPool.Nodes.Count)</h6>
+            @if (SelectedPool.Nodes.Count == 0)
+            {
+                <p class="small"><em>@T("No readable instance for this pool.")</em></p>
+            }
+            else
+            {
+                <table class="table table-sm">
+                    <thead><tr><th>@T("Node")</th><th>Provisioning</th><th>Power state</th><th>@T("Zone")</th></tr></thead>
+                    <tbody>
+                        @foreach (var node in SelectedPool.Nodes)
+                        {
+                            <tr>
+                                <td>@node.Name</td>
+                                <td>@node.ProvisioningState</td>
+                                <td>@node.PowerState</td>
+                                <td>@node.Zone</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        }
+    }
+}
+
+@code {
+    private List<AksClusterInfo> Clusters { get; set; } = new();
+    private string SelectedSubscriptionId { get; set; } = "";
+    private string NameFilter { get; set; } = "";
+
+    private AksClusterInfo? SelectedCluster { get; set; }
+    private AksClusterOverview? Overview { get; set; }
+    private string ActiveTab { get; set; } = "overview";
+
+    private string CurrentVersion { get; set; } = "";
+    private IReadOnlyList<string> UpgradeVersions { get; set; } = Array.Empty<string>();
+    private string UpgradeTarget { get; set; } = "";
+
+    private List<AksNodePoolDetail>? NodePools { get; set; }
+    private string? SelectedPoolName { get; set; }
+    private AksNodePoolDetail? SelectedPool => NodePools?.FirstOrDefault(p => p.Name == SelectedPoolName);
+    private int PoolScaleTarget { get; set; }
+    private string PoolUpgradeTarget { get; set; } = "";
+
+    private IEnumerable<AksClusterInfo> FilteredClusters => Clusters.Where(c =>
+        string.IsNullOrWhiteSpace(NameFilter) || c.Name.Contains(NameFilter, StringComparison.OrdinalIgnoreCase));
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            Subscriptions = await Inventory.ListSubscriptionsAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+
+        await AutoOpenAsync();
+    }
+
+    private async Task AutoOpenAsync()
+    {
+        var id = RequestedResourceId;
+        if (id is null || Subscriptions.Count == 0) return;
+
+        await OnSubscriptionChangedAsync(RequestedSubscriptionId ?? "");
+        var item = Clusters.FirstOrDefault(x => string.Equals(x.Id, id, StringComparison.OrdinalIgnoreCase));
+        if (item is not null)
+        {
+            await OpenClusterAsync(item);
+        }
+    }
+
+    private async Task OnSubscriptionChangedAsync(string subscriptionId)
+    {
+        SelectedSubscriptionId = subscriptionId;
+        Clusters = new();
+        HasLoadedAllSubscriptions = false;
+
+        // Clearing back to "all" doesn't auto-load: fetching every subscription is expensive,
+        // so it waits for the explicit button instead of firing on every selection change.
+        if (string.IsNullOrEmpty(SelectedSubscriptionId)) return;
+
+        await LoadAsync(new[] { SelectedSubscriptionId });
+    }
+
+    private async Task LoadAllSubscriptionsAsync()
+    {
+        HasLoadedAllSubscriptions = true;
+        await LoadAsync(Subscriptions.Select(s => s.SubscriptionId).ToList());
+    }
+
+    private async Task LoadAsync(IEnumerable<string> subscriptionIds)
+    {
+        IsLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            var clusters = new List<AksClusterInfo>();
+            foreach (var id in subscriptionIds)
+            {
+                clusters.AddRange(await AksOps.ListAllClustersAsync(id));
+            }
+
+            Clusters = clusters;
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private async Task OpenClusterAsync(AksClusterInfo cluster)
+    {
+        if (IsBusy) return;
+
+        IsBusy = true;
+        SetStatus(T("Opening {0}...", cluster.Name), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await LoadClusterDetailAsync(cluster);
+            SelectedCluster = cluster;
+            ActiveTab = "overview";
+            NodePools = null;
+            SelectedPoolName = null;
+            SetStatus("", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task LoadClusterDetailAsync(AksClusterInfo cluster)
+    {
+        Overview = await AksOps.GetOverviewAsync(cluster.Id);
+        var upgrade = await AksOps.GetUpgradeInfoAsync(cluster.Id);
+        CurrentVersion = upgrade.CurrentVersion;
+        UpgradeVersions = upgrade.AvailableVersions;
+        UpgradeTarget = upgrade.AvailableVersions.FirstOrDefault() ?? "";
+    }
+
+    private void CloseCluster()
+    {
+        SelectedCluster = null;
+        Overview = null;
+        NodePools = null;
+        SelectedPoolName = null;
+        SetStatus("", error: false);
+    }
+
+    private async Task RefreshClusterAsync()
+    {
+        if (IsBusy || SelectedCluster is null) return;
+
+        IsBusy = true;
+        StateHasChanged();
+
+        try
+        {
+            await LoadClusterDetailAsync(SelectedCluster);
+            if (NodePools is not null)
+            {
+                await ReloadPoolsAsync(SelectedCluster);
+            }
+
+            SetStatus("", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task SelectTabAsync(string tab)
+    {
+        ActiveTab = tab;
+        if (tab != "pools" || NodePools is not null || SelectedCluster is null || IsBusy) return;
+
+        IsBusy = true;
+        SetStatus(T("Reading the node pools of {0}...", SelectedCluster.Name), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await ReloadPoolsAsync(SelectedCluster);
+            SetStatus("", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task ReloadPoolsAsync(AksClusterInfo cluster)
+    {
+        NodePools = await AksOps.GetNodePoolsAsync(cluster.Id);
+        ResetPoolTargets();
+    }
+
+    private void SelectPool(string name)
+    {
+        SelectedPoolName = name;
+        ResetPoolTargets();
+    }
+
+    private void BackToPools() => SelectedPoolName = null;
+
+    private void ResetPoolTargets()
+    {
+        var pool = SelectedPool;
+        PoolScaleTarget = pool?.Count ?? 0;
+        PoolUpgradeTarget = pool?.AvailableVersions.FirstOrDefault() ?? "";
+    }
+
+    private Task StartAsync(AksClusterInfo cluster) => RunActionAsync(cluster.Id, AksOps.StartAsync, T("Starting"), cluster.Name);
+    private Task StopAsync(AksClusterInfo cluster) => RunActionAsync(cluster.Id, AksOps.StopAsync, T("Stopping"), cluster.Name);
+
+    private Task ApplyUpgradeAsync()
+    {
+        var cluster = SelectedCluster;
+        var target = UpgradeTarget;
+        if (cluster is null || string.IsNullOrEmpty(target)) return Task.CompletedTask;
+
+        return RunActionAsync(cluster.Id, (id, ct) => AksOps.UpgradeControlPlaneAsync(id, target, ct),
+            T("Upgrade control plane to {0}", target), cluster.Name);
+    }
+
+    private bool PoolIsIdle(AksNodePoolDetail pool) => pool.ProvisioningState == "Succeeded";
+
+    private Task ScalePoolAsync(AksNodePoolDetail pool)
+    {
+        var count = PoolScaleTarget;
+        return RunActionAsync(SelectedCluster!.Id, (id, ct) => AksOps.ScaleNodePoolAsync(id, pool.Name, count, ct),
+            T("Scale pool {0} to {1} nodes", pool.Name, count), SelectedCluster.Name);
+    }
+
+    private Task UpgradePoolAsync(AksNodePoolDetail pool)
+    {
+        var target = PoolUpgradeTarget;
+        if (string.IsNullOrEmpty(target)) return Task.CompletedTask;
+
+        return RunActionAsync(SelectedCluster!.Id, (id, ct) => AksOps.UpgradeNodePoolAsync(id, pool.Name, target, ct),
+            T("Upgrade pool {0} to {1}", pool.Name, target), SelectedCluster.Name);
+    }
+
+    private async Task RunActionAsync(string resourceId, Func<string, CancellationToken, Task> action, string verb, string clusterName)
+    {
+        if (IsBusy) return;
+
+        IsBusy = true;
+        SetStatus(T("{0} ({1})...", verb, clusterName), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await action(resourceId, CancellationToken.None);
+
+            if (SelectedCluster is not null)
+            {
+                await LoadClusterDetailAsync(SelectedCluster);
+                if (NodePools is not null)
+                {
+                    await ReloadPoolsAsync(SelectedCluster);
+                }
+            }
+            else
+            {
+                await LoadAsync(string.IsNullOrEmpty(SelectedSubscriptionId)
+                    ? Subscriptions.Select(s => s.SubscriptionId).ToList()
+                    : new[] { SelectedSubscriptionId });
+            }
+
+            SetStatus(T("{0}: operation started. Refresh to follow the status.", verb), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+}

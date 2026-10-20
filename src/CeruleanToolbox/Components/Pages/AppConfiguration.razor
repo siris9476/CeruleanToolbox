@@ -1,0 +1,427 @@
+@page "/appconfiguration"
+@using CeruleanToolbox.Services
+@inject ResourceInventoryService Inventory
+@inject AppConfigurationService AppConfigOps
+@inherits CeruleanToolboxPageBase
+
+<PageTitle>App Configuration</PageTitle>
+
+<h1>App Configuration</h1>
+
+@if (SelectedStore is null)
+{
+    <p>
+        @T("Lists the App Configuration stores. Click a store name, or double-click its row, to open its overview and key-value pairs.")
+    </p>
+
+    <div class="row mb-3">
+        <div class="col-md-6">
+            <label class="form-label">@T("Subscription (optional)")</label>
+            <SearchableSelect TItem="SubscriptionInfo" Items="Subscriptions"
+                               GetLabel="@(s => $"{s.DisplayName} ({s.SubscriptionId})")" GetValue="@(s => s.SubscriptionId)"
+                               SelectedValue="SelectedSubscriptionId" SelectedValueChanged="OnSubscriptionChangedAsync"
+                               Placeholder="@T("-- all --")" Disabled="@(IsLoading || IsBusy)" />
+        </div>
+        <div class="col-md-4">
+            <label class="form-label">@T("Filter by name")</label>
+            <input class="form-control" placeholder="@T("filter...")" @bind="NameFilter" @bind:event="oninput" />
+        </div>
+    </div>
+}
+
+@if (!string.IsNullOrEmpty(StatusMessage))
+{
+    <div class="alert @(IsError ? "alert-danger" : "alert-info")">@StatusMessage</div>
+}
+
+@if (SelectedStore is null)
+{
+    @if (string.IsNullOrEmpty(SelectedSubscriptionId) && !HasLoadedAllSubscriptions && !IsLoading)
+    {
+        <div class="alert alert-secondary">
+            @T("No subscription selected: pick one for a quick view, or")
+            <button class="btn btn-sm btn-outline-primary" @onclick="LoadAllSubscriptionsAsync">@T("Load all subscriptions")</button>
+            @T("— it can take a while if you have many.")
+        </div>
+    }
+
+    @if (IsLoading)
+    {
+        <div class="d-flex align-items-center gap-2 mb-3">
+            <div class="spinner-border spinner-border-sm text-primary" role="status" aria-hidden="true"></div>
+            <span>@T("Loading...")</span>
+        </div>
+    }
+
+    @if (!IsLoading && (!string.IsNullOrEmpty(SelectedSubscriptionId) || HasLoadedAllSubscriptions))
+    {
+        @if (!FilteredStores.Any())
+        {
+            <p><em>@T("No App Configuration stores found.")</em></p>
+        }
+        else
+        {
+            <table class="table table-sm table-hover align-middle">
+                <thead>
+                    <tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>Endpoint</th><th>SKU</th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var store in FilteredStores)
+                    {
+                        <tr style="cursor: pointer;" title="@T("Double-click to open the store")" @ondblclick="() => OpenStoreAsync(store)">
+                            <td>
+                                <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenStoreAsync(store)">
+                                    @store.Name <span aria-hidden="true">&rsaquo;</span>
+                                </button>
+                            </td>
+                            <td>@GetSubscriptionName(store.Id)</td>
+                            <td>@store.ResourceGroup</td>
+                            <td>@store.Endpoint</td>
+                            <td>@store.Sku</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+    }
+}
+else
+{
+    <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
+        <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" @onclick="CloseStore">&larr; App Configuration</button>
+        <h4 class="mb-0">@SelectedStore.Name</h4>
+        @if (Overview is not null)
+        {
+            <span class="badge bg-secondary">@Overview.Status</span>
+        }
+        <button class="btn btn-sm btn-outline-secondary ms-auto" disabled="@IsBusy" @onclick="RefreshStoreAsync">@T("Refresh")</button>
+    </div>
+    <p class="text-muted small">
+        @GetSubscriptionName(SelectedStore.Id) · @T("Resource group {0}", SelectedStore.ResourceGroup) ·@SelectedStore.Location
+    </p>
+
+    <ul class="nav nav-tabs mb-3">
+        <li class="nav-item"><button class="nav-link @(ActiveTab == "overview" ? "active" : "")" @onclick='() => ActiveTab = "overview"'>@T("Overview")</button></li>
+        <li class="nav-item"><button class="nav-link @(ActiveTab == "keys" ? "active" : "")" @onclick='() => ActiveTab = "keys"'>@T("Keys and values")</button></li>
+    </ul>
+
+    @if (ActiveTab == "overview" && Overview is not null)
+    {
+        <ResourceOverviewView Overview="Overview" />
+    }
+    else if (ActiveTab == "keys")
+    {
+        <p class="text-muted small">
+            @T("Data access requires an explicit data role on the store (")<strong>App Configuration Data Owner</strong>
+            @T("for read and write,") <strong>App Configuration Data Reader</strong> @T("for read-only access): Owner or Contributor on the subscription are not enough, as with Key Vault and Storage.")
+        </p>
+        <h3 class="mt-3">@T("Keys")</h3>
+        @if (IsLoadingDetail)
+        {
+            <div class="d-flex align-items-center gap-2 mb-3">
+                <div class="spinner-border spinner-border-sm text-primary" role="status" aria-hidden="true"></div>
+                <span>@T("Loading keys...")</span>
+            </div>
+        }
+        else
+        {
+            <div class="row mb-3">
+                <div class="col-md-3">
+                    <label class="form-label">@T("Key")</label>
+                    <input class="form-control" @bind="NewKey" placeholder="MyApp:Setting" />
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label">@T("Label (optional)")</label>
+                    <input class="form-control" @bind="NewLabel" placeholder="production" />
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label">@T("Value")</label>
+                    <input class="form-control" @bind="NewValue" />
+                </div>
+                <div class="col-md-2 d-flex align-items-end">
+                    <button class="btn btn-primary" disabled="@(string.IsNullOrWhiteSpace(NewKey) || IsBusy)" @onclick="SaveSettingAsync">
+                        @(IsBusy ? T("Saving...") : T("Save"))
+                    </button>
+                </div>
+            </div>
+
+            @if (Settings.Count == 0)
+            {
+                <p><em>@T("No keys found in this store.")</em></p>
+            }
+            else
+            {
+                <table class="table table-sm">
+                    <thead><tr><th>@T("Key")</th><th>Label</th><th>@T("Value")</th><th>@T("Read-only")</th><th>@T("Last modified")</th><th></th></tr></thead>
+                    <tbody>
+                        @foreach (var setting in Settings)
+                        {
+                            <tr @key="GetSettingKey(setting)">
+                                <td>@setting.Key</td>
+                                <td>@(setting.Label ?? "-")</td>
+                                <td>@setting.Value</td>
+                                <td>@(setting.IsReadOnly ? T("Yes") : T("No"))</td>
+                                <td>@(setting.LastModified?.LocalDateTime.ToString("g") ?? "-")</td>
+                                <td>
+                                    <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" @onclick="() => EditSetting(setting)">@T("Edit")</button>
+                                    <ConfirmDeleteButton ConfirmText="@setting.Key" IsBusy="@(IsBusy || setting.IsReadOnly)"
+                                                          OnConfirmed="() => DeleteSettingAsync(setting)" />
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        }
+    }
+}
+
+@code {
+    private List<AppConfigStoreInfo> Stores { get; set; } = new();
+    private List<AppConfigSettingInfo> Settings { get; set; } = new();
+
+    private string SelectedSubscriptionId { get; set; } = "";
+    private string SelectedStoreId { get; set; } = "";
+    private string? SelectedStoreEndpoint { get; set; }
+    private string NameFilter { get; set; } = "";
+    private ResourceOverview? Overview { get; set; }
+    private string ActiveTab { get; set; } = "overview";
+    private AppConfigStoreInfo? SelectedStore => Stores.FirstOrDefault(s => s.Id == SelectedStoreId);
+
+    private IEnumerable<AppConfigStoreInfo> FilteredStores => Stores.Where(s =>
+        string.IsNullOrWhiteSpace(NameFilter) || s.Name.Contains(NameFilter, StringComparison.OrdinalIgnoreCase));
+
+    private string NewKey { get; set; } = "";
+    private string? NewLabel { get; set; }
+    private string NewValue { get; set; } = "";
+
+    private static string GetSettingKey(AppConfigSettingInfo setting) => $"{setting.Key}|{setting.Label}";
+    private bool IsLoadingDetail { get; set; }
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            Subscriptions = await Inventory.ListSubscriptionsAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+
+        await AutoOpenAsync();
+    }
+
+    private async Task AutoOpenAsync()
+    {
+        var id = RequestedResourceId;
+        if (id is null || Subscriptions.Count == 0) return;
+
+        await OnSubscriptionChangedAsync(RequestedSubscriptionId ?? "");
+        var item = Stores.FirstOrDefault(x => string.Equals(x.Id, id, StringComparison.OrdinalIgnoreCase));
+        if (item is not null)
+        {
+            await OpenStoreAsync(item);
+        }
+    }
+
+    private async Task OnSubscriptionChangedAsync(string subscriptionId)
+    {
+        SelectedSubscriptionId = subscriptionId;
+        Stores.Clear();
+        ClearSelectedStore();
+        HasLoadedAllSubscriptions = false;
+
+        // Clearing back to "all" doesn't auto-load: fetching every subscription is expensive,
+        // so it waits for the explicit button below instead of firing on every selection change.
+        if (string.IsNullOrEmpty(SelectedSubscriptionId)) return;
+
+        IsLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            Stores = await AppConfigOps.ListAllAsync(SelectedSubscriptionId);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private async Task LoadAllSubscriptionsAsync()
+    {
+        HasLoadedAllSubscriptions = true;
+        IsLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            var stores = new List<AppConfigStoreInfo>();
+            foreach (var sub in Subscriptions)
+            {
+                stores.AddRange(await AppConfigOps.ListAllAsync(sub.SubscriptionId));
+            }
+
+            Stores = stores;
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private void ClearSelectedStore()
+    {
+        SelectedStoreId = "";
+        SelectedStoreEndpoint = null;
+        Settings.Clear();
+        ClearForm();
+    }
+
+    private void ClearForm()
+    {
+        NewKey = "";
+        NewLabel = null;
+        NewValue = "";
+    }
+
+    private async Task OpenStoreAsync(AppConfigStoreInfo store)
+    {
+        if (IsBusy) return;
+
+        IsBusy = true;
+        SetStatus(T("Opening {0}...", store.Name), error: false);
+        StateHasChanged();
+
+        try
+        {
+            Overview = await AppConfigOps.GetOverviewAsync(store.Id);
+            SelectedStoreId = store.Id;
+            SelectedStoreEndpoint = store.Endpoint;
+            ActiveTab = "overview";
+            Settings.Clear();
+            ClearForm();
+            SetStatus("", error: false);
+
+            // Key-values are a data-plane call that needs a data role; a 403 there is reported but
+            // must not stop the management-plane overview above.
+            try
+            {
+                Settings = await AppConfigOps.ListSettingsAsync(store.Endpoint);
+            }
+            catch (Exception ex)
+            {
+                SetStatus(T("Reading the keys failed: {0}", ex.Message), error: true);
+            }
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private void CloseStore()
+    {
+        ClearSelectedStore();
+        Overview = null;
+        SetStatus("", error: false);
+    }
+
+    private async Task RefreshStoreAsync()
+    {
+        if (IsBusy || SelectedStore is null) return;
+
+        IsBusy = true;
+        StateHasChanged();
+
+        try
+        {
+            Overview = await AppConfigOps.GetOverviewAsync(SelectedStore.Id);
+            SetStatus("", error: false);
+            Settings = await AppConfigOps.ListSettingsAsync(SelectedStore.Endpoint);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private void EditSetting(AppConfigSettingInfo setting)
+    {
+        NewKey = setting.Key;
+        NewLabel = setting.Label;
+        NewValue = setting.Value;
+    }
+
+    private async Task SaveSettingAsync()
+    {
+        if (SelectedStoreEndpoint is null) return;
+
+        IsBusy = true;
+        SetStatus(T("Saving \"{0}\"...", NewKey), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await AppConfigOps.SetSettingAsync(SelectedStoreEndpoint, NewKey, NewValue, NewLabel);
+            SetStatus(T("\"{0}\" saved.", NewKey), error: false);
+            Settings = await AppConfigOps.ListSettingsAsync(SelectedStoreEndpoint);
+            ClearForm();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task DeleteSettingAsync(AppConfigSettingInfo setting)
+    {
+        if (SelectedStoreEndpoint is null) return;
+
+        // Guards against a double-click firing this twice before the "disabled" attribute
+        // re-renders in the browser: Blazor Server processes UI events one at a time per
+        // circuit, so this in-memory check is enough to make the second click a no-op.
+        if (IsBusy) return;
+
+        IsBusy = true;
+        SetStatus(T("Deleting \"{0}\"...", setting.Key), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await AppConfigOps.DeleteSettingAsync(SelectedStoreEndpoint, setting.Key, setting.Label);
+            SetStatus(T("\"{0}\" deleted.", setting.Key), error: false);
+            Settings = await AppConfigOps.ListSettingsAsync(SelectedStoreEndpoint);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+}

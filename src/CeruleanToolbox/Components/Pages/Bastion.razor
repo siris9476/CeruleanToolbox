@@ -1,0 +1,433 @@
+@page "/bastion"
+@using CeruleanToolbox.Services
+@inject ResourceInventoryService Inventory
+@inject BastionService BastionOps
+@inject VmOperationsService VmOps
+@inherits CeruleanToolboxPageBase
+
+<PageTitle>Bastion</PageTitle>
+
+<h1>Azure Bastion</h1>
+
+@if (SelectedHost is null)
+{
+    <p>@IntroText</p>
+
+    <div class="row mb-3">
+        <div class="col-md-6">
+            <label class="form-label">@T("Subscription (optional)")</label>
+            <SearchableSelect TItem="SubscriptionInfo" Items="Subscriptions"
+                               GetLabel="@(s => $"{s.DisplayName} ({s.SubscriptionId})")" GetValue="@(s => s.SubscriptionId)"
+                               SelectedValue="SelectedSubscriptionId" SelectedValueChanged="OnSubscriptionChangedAsync"
+                               Placeholder="@T("-- all --")" Disabled="@(IsLoading || IsBusy)" />
+        </div>
+        <div class="col-md-4">
+            <label class="form-label">@T("Filter by name")</label>
+            <input class="form-control" placeholder="@T("filter...")" @bind="NameFilter" @bind:event="oninput" />
+        </div>
+    </div>
+}
+
+@if (!string.IsNullOrEmpty(StatusMessage))
+{
+    <div class="alert @(IsError ? "alert-danger" : "alert-info")">@StatusMessage</div>
+}
+
+@if (SelectedHost is null)
+{
+    @if (string.IsNullOrEmpty(SelectedSubscriptionId) && !HasLoadedAllSubscriptions && !IsLoading)
+    {
+        <div class="alert alert-secondary">
+            @T("No subscription selected: pick one for a quick view, or")
+            <button class="btn btn-sm btn-outline-primary" @onclick="LoadAllSubscriptionsAsync">@T("Load all subscriptions")</button>
+            @T("— it can take a while if you have many.")
+        </div>
+    }
+
+    @if (IsLoading)
+    {
+        <div class="d-flex align-items-center gap-2 mb-3">
+            <div class="spinner-border spinner-border-sm text-primary" role="status" aria-hidden="true"></div>
+            <span>@T("Loading...")</span>
+        </div>
+    }
+
+    @if (!IsLoading && (!string.IsNullOrEmpty(SelectedSubscriptionId) || HasLoadedAllSubscriptions))
+    {
+        @if (!FilteredHosts.Any())
+        {
+            <p><em>@T("No Bastion hosts found.")</em></p>
+        }
+        else
+        {
+            <table class="table table-sm table-hover align-middle">
+                <thead>
+                    <tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>SKU</th><th>DNS name</th><th>Shareable link</th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var host in FilteredHosts)
+                    {
+                        <tr style="cursor: pointer;" title="@T("Double-click to open the host")" @ondblclick="() => OpenHostAsync(host)">
+                            <td>
+                                <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenHostAsync(host)">
+                                    @host.Name <span aria-hidden="true">&rsaquo;</span>
+                                </button>
+                            </td>
+                            <td>@GetSubscriptionName(host.Id)</td>
+                            <td>@host.ResourceGroup</td>
+                            <td>@host.SkuName</td>
+                            <td>@host.DnsName</td>
+                            <td>@(host.ShareableLinkEnabled ? T("Enabled") : T("Disabled"))</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+    }
+}
+else
+{
+    <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
+        <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" @onclick="CloseHost">&larr; Bastion</button>
+        <h4 class="mb-0">@SelectedHost.Name</h4>
+        @if (Overview is not null)
+        {
+            <span class="badge bg-secondary">@Overview.Status</span>
+        }
+        <button class="btn btn-sm btn-outline-secondary ms-auto" disabled="@IsBusy" @onclick="RefreshHostAsync">@T("Refresh")</button>
+    </div>
+    <p class="text-muted small">
+        @GetSubscriptionName(SelectedHost.Id) · @T("Resource group {0}", SelectedHost.ResourceGroup) ·@SelectedHost.Location
+    </p>
+
+    <ul class="nav nav-tabs mb-3">
+        <li class="nav-item"><button class="nav-link @(ActiveTab == "overview" ? "active" : "")" @onclick='() => ActiveTab = "overview"'>@T("Overview")</button></li>
+        <li class="nav-item"><button class="nav-link @(ActiveTab == "links" ? "active" : "")" @onclick='() => ActiveTab = "links"'>@T("Shared links")</button></li>
+    </ul>
+
+    @if (ActiveTab == "overview" && Overview is not null)
+    {
+        <ResourceOverviewView Overview="Overview" />
+    }
+    else if (ActiveTab == "links")
+    {
+    <h6>@T("Select the virtual machine")</h6>
+    @if (VirtualMachines.Count == 0)
+    {
+        <p><em>@T("No VMs found.")</em></p>
+    }
+    else
+    {
+        <table class="table table-sm">
+            <thead>
+                <tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>Location</th><th></th></tr>
+                <tr>
+                    <th>
+                        <input class="form-control form-control-sm" list="bastion-vm-name-list" placeholder="@T("filter...")" @bind="VmNameFilter" @bind:event="oninput" />
+                        <datalist id="bastion-vm-name-list">
+                            @foreach (var v in DistinctValues(VirtualMachines, vm => vm.Name))
+                            {
+                                <option value="@v" />
+                            }
+                        </datalist>
+                    </th>
+                    <th>
+                        <input class="form-control form-control-sm" list="bastion-vm-sub-list" placeholder="@T("filter...")" @bind="VmSubscriptionFilter" @bind:event="oninput" />
+                        <datalist id="bastion-vm-sub-list">
+                            @foreach (var v in DistinctValues(VirtualMachines, vm => GetSubscriptionName(vm.Id)))
+                            {
+                                <option value="@v" />
+                            }
+                        </datalist>
+                    </th>
+                    <th>
+                        <input class="form-control form-control-sm" list="bastion-vm-rg-list" placeholder="@T("filter...")" @bind="VmResourceGroupFilter" @bind:event="oninput" />
+                        <datalist id="bastion-vm-rg-list">
+                            @foreach (var v in DistinctValues(VirtualMachines, vm => vm.ResourceGroup))
+                            {
+                                <option value="@v" />
+                            }
+                        </datalist>
+                    </th>
+                    <th></th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var vm in FilteredVirtualMachines)
+                {
+                    <tr class="@(SelectedVmId == vm.Id ? "table-success" : "")">
+                        <td>@vm.Name</td>
+                        <td>@GetSubscriptionName(vm.Id)</td>
+                        <td>@vm.ResourceGroup</td>
+                        <td>@vm.Location</td>
+                        <td>
+                            @if (SelectedVmId == vm.Id)
+                            {
+                                <span class="text-success">@T("Selected")</span>
+                            }
+                            else
+                            {
+                                <button class="btn btn-sm btn-outline-primary" @onclick="() => SelectVm(vm.Id)">@T("Select")</button>
+                            }
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+
+        <h6 class="mt-3">@T("Generate shared link")</h6>
+        @if (string.IsNullOrEmpty(SelectedHostId) || string.IsNullOrEmpty(SelectedVmId))
+        {
+            <p class="text-muted">@T("Select a virtual machine from the table above to enable the buttons.")</p>
+        }
+        <div class="mb-3">
+            <button class="btn btn-primary" disabled="@(IsBusy || string.IsNullOrEmpty(SelectedHostId) || string.IsNullOrEmpty(SelectedVmId))" @onclick="GenerateLinkAsync">@T("Generate shared link")</button>
+            <ConfirmDeleteButton ConfirmText="@SelectedVmName" ButtonLabel="@T("Revoke link")" ConfirmLabel="@T("Confirm revocation")"
+                                  IsBusy="@(IsBusy || string.IsNullOrEmpty(SelectedHostId) || string.IsNullOrEmpty(SelectedVmId))"
+                                  OnConfirmed="RevokeLinkAsync" />
+        </div>
+
+        @if (!string.IsNullOrEmpty(ShareableLink))
+        {
+            <div class="alert alert-success">
+                <a href="@ShareableLink" target="_blank" rel="noopener noreferrer">@ShareableLink</a>
+            </div>
+        }
+    }
+}
+
+@code {
+    private static string IntroText => T("Lists the Bastion hosts. Click a host name, or double-click its row, to open its overview and generate a shared link (\"Bastion Shareable Link\") to open an RDP/SSH session to a VM directly from the browser, useful for people who only have read access on the VM. Requires a Standard SKU host with the shareable link enabled.");
+
+    private List<BastionHostInfo> Hosts { get; set; } = new();
+    private List<VmInfo> VirtualMachines { get; set; } = new();
+
+    private string SelectedSubscriptionId { get; set; } = "";
+    private string SelectedHostId { get; set; } = "";
+    private string NameFilter { get; set; } = "";
+    private ResourceOverview? Overview { get; set; }
+    private string ActiveTab { get; set; } = "overview";
+    private BastionHostInfo? SelectedHost => Hosts.FirstOrDefault(h => h.Id == SelectedHostId);
+
+    private IEnumerable<BastionHostInfo> FilteredHosts => Hosts.Where(h =>
+        string.IsNullOrWhiteSpace(NameFilter) || h.Name.Contains(NameFilter, StringComparison.OrdinalIgnoreCase));
+    private string SelectedVmId { get; set; } = "";
+    private string? ShareableLink { get; set; }
+
+    private string SelectedVmName => VirtualMachines.FirstOrDefault(v => v.Id == SelectedVmId)?.Name ?? "";
+
+    private string VmNameFilter { get; set; } = "";
+    private string VmSubscriptionFilter { get; set; } = "";
+    private string VmResourceGroupFilter { get; set; } = "";
+
+    private IEnumerable<VmInfo> FilteredVirtualMachines =>
+        VirtualMachines.Where(vm =>
+            (string.IsNullOrEmpty(VmNameFilter) || vm.Name.Contains(VmNameFilter, StringComparison.OrdinalIgnoreCase)) &&
+            (string.IsNullOrEmpty(VmSubscriptionFilter) || GetSubscriptionName(vm.Id).Contains(VmSubscriptionFilter, StringComparison.OrdinalIgnoreCase)) &&
+            (string.IsNullOrEmpty(VmResourceGroupFilter) || vm.ResourceGroup.Contains(VmResourceGroupFilter, StringComparison.OrdinalIgnoreCase)));
+
+    private static List<string> DistinctValues<T>(IEnumerable<T> items, Func<T, string> selector) =>
+        items.Select(selector).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(v => v, StringComparer.OrdinalIgnoreCase).ToList();
+
+    private void SelectVm(string vmId)
+    {
+        SelectedVmId = vmId;
+        ShareableLink = null;
+    }
+
+    private async Task OpenHostAsync(BastionHostInfo host)
+    {
+        if (IsBusy) return;
+
+        IsBusy = true;
+        SetStatus(T("Opening {0}...", host.Name), error: false);
+        StateHasChanged();
+
+        try
+        {
+            Overview = await BastionOps.GetOverviewAsync(host.Id);
+            SelectedHostId = host.Id;
+            SelectedVmId = "";
+            ShareableLink = null;
+            ActiveTab = "overview";
+            SetStatus("", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private void CloseHost()
+    {
+        SelectedHostId = "";
+        SelectedVmId = "";
+        ShareableLink = null;
+        Overview = null;
+        SetStatus("", error: false);
+    }
+
+    private async Task RefreshHostAsync()
+    {
+        if (IsBusy || SelectedHost is null) return;
+
+        IsBusy = true;
+        StateHasChanged();
+
+        try
+        {
+            Overview = await BastionOps.GetOverviewAsync(SelectedHost.Id);
+            SetStatus("", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            Subscriptions = await Inventory.ListSubscriptionsAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+
+        await AutoOpenAsync();
+    }
+
+    private async Task AutoOpenAsync()
+    {
+        var id = RequestedResourceId;
+        if (id is null || Subscriptions.Count == 0) return;
+
+        await OnSubscriptionChangedAsync(RequestedSubscriptionId ?? "");
+        var item = Hosts.FirstOrDefault(x => string.Equals(x.Id, id, StringComparison.OrdinalIgnoreCase));
+        if (item is not null)
+        {
+            await OpenHostAsync(item);
+        }
+    }
+
+    private async Task OnSubscriptionChangedAsync(string subscriptionId)
+    {
+        SelectedSubscriptionId = subscriptionId;
+        Hosts.Clear();
+        VirtualMachines.Clear();
+        SelectedHostId = "";
+        SelectedVmId = "";
+        ShareableLink = null;
+        HasLoadedAllSubscriptions = false;
+
+        // Clearing back to "all" doesn't auto-load: fetching every subscription is expensive,
+        // so it waits for the explicit button below instead of firing on every selection change.
+        if (string.IsNullOrEmpty(SelectedSubscriptionId)) return;
+
+        IsLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            Hosts = await BastionOps.ListAllAsync(SelectedSubscriptionId);
+            VirtualMachines = await VmOps.ListAllVirtualMachinesAsync(SelectedSubscriptionId);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private async Task LoadAllSubscriptionsAsync()
+    {
+        HasLoadedAllSubscriptions = true;
+        IsLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            var hosts = new List<BastionHostInfo>();
+            var vms = new List<VmInfo>();
+            foreach (var sub in Subscriptions)
+            {
+                hosts.AddRange(await BastionOps.ListAllAsync(sub.SubscriptionId));
+                vms.AddRange(await VmOps.ListAllVirtualMachinesAsync(sub.SubscriptionId));
+            }
+
+            Hosts = hosts;
+            VirtualMachines = vms;
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private async Task GenerateLinkAsync()
+    {
+        IsBusy = true;
+        SetStatus(T("Generating the link..."), error: false);
+        ShareableLink = null;
+        StateHasChanged();
+
+        try
+        {
+            ShareableLink = await BastionOps.CreateShareableLinkAsync(SelectedHostId, SelectedVmId);
+            SetStatus(T("Link generated."), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task RevokeLinkAsync()
+    {
+        // Guards against a double-click firing this twice before the "disabled" attribute
+        // re-renders in the browser: Blazor Server processes UI events one at a time per
+        // circuit, so this in-memory check is enough to make the second click a no-op.
+        if (IsBusy) return;
+        IsBusy = true;
+        SetStatus(T("Revoking the link..."), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await BastionOps.DeleteShareableLinkAsync(SelectedHostId, SelectedVmId);
+            ShareableLink = null;
+            SetStatus(T("Link revoked."), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+}

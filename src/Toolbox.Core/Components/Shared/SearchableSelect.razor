@@ -1,0 +1,62 @@
+@typeparam TItem
+
+<input class="form-control @Class" list="@_listId" placeholder="@Placeholder"
+       value="@_inputText" disabled="@Disabled" @oninput="OnInputAsync" />
+<datalist id="@_listId">
+    @foreach (var item in Items.OrderBy(GetLabel, StringComparer.OrdinalIgnoreCase))
+    {
+        <option value="@GetLabel(item)" />
+    }
+</datalist>
+
+@code {
+    [Parameter, EditorRequired] public List<TItem> Items { get; set; } = new();
+    [Parameter, EditorRequired] public Func<TItem, string> GetLabel { get; set; } = _ => "";
+    [Parameter, EditorRequired] public Func<TItem, string> GetValue { get; set; } = _ => "";
+    [Parameter] public string SelectedValue { get; set; } = "";
+    [Parameter] public EventCallback<string> SelectedValueChanged { get; set; }
+    [Parameter] public string Placeholder { get; set; } = T("-- select (or type to search) --");
+    [Parameter] public string Class { get; set; } = "";
+    [Parameter] public bool Disabled { get; set; }
+
+    private readonly string _listId = $"dl-{Guid.NewGuid():N}";
+    private string _inputText = "";
+    private string? _lastAppliedValue;
+
+    protected override void OnParametersSet()
+    {
+        // Only re-derive the displayed text when the parent changes SelectedValue itself
+        // (e.g. resetting on a parent selector change) — not on every unrelated re-render,
+        // otherwise a StateHasChanged elsewhere on the page would wipe what the user is typing.
+        if (SelectedValue == _lastAppliedValue) return;
+
+        _lastAppliedValue = SelectedValue;
+        if (string.IsNullOrEmpty(SelectedValue))
+        {
+            _inputText = "";
+        }
+        else
+        {
+            var match = Items.FirstOrDefault(i => GetValue(i) == SelectedValue);
+            if (match is not null)
+            {
+                _inputText = GetLabel(match);
+            }
+        }
+    }
+
+    private async Task OnInputAsync(ChangeEventArgs e)
+    {
+        _inputText = e.Value?.ToString() ?? "";
+
+        var match = Items.FirstOrDefault(i => GetLabel(i) == _inputText);
+        var newValue = match is not null ? GetValue(match) : "";
+
+        if (newValue != SelectedValue)
+        {
+            SelectedValue = newValue;
+            _lastAppliedValue = newValue;
+            await SelectedValueChanged.InvokeAsync(newValue);
+        }
+    }
+}

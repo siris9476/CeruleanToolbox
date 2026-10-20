@@ -1,0 +1,420 @@
+@page "/activity"
+@using CeruleanToolbox.Services
+@inject PageStateStore PageState
+@inject ResourceInventoryService Inventory
+@inject ActivityLogService ActivityOps
+@inject ConnectionManagerService Connections
+@inject AzureClientFactory ClientFactory
+@implements IDisposable
+
+<PageTitle>@T("Activity log")</PageTitle>
+
+<h1>@T("Activity log")</h1>
+<p>
+    @T("Who did what in the active subscription, when and from which IP address: creations, deletions, changes and errors.")
+    @T("Events with the same correlation ID are grouped into a single operation (click the row for details).")
+</p>
+
+@if (!string.IsNullOrEmpty(StatusMessage))
+{
+    <div class="alert @(IsError ? "alert-danger" : "alert-info")">@StatusMessage</div>
+}
+
+<div class="row g-2 align-items-end mb-2">
+    <div class="col-md-5">
+        <label class="form-label mb-0 small">@T("Active subscription (connection {0})", Connections.ActiveConnection?.Name ?? "-")</label>
+        @if (Subscriptions.Count > 1)
+        {
+            <select class="form-select form-select-sm" @bind="SubscriptionId" disabled="@IsLoading">
+                @foreach (var s in Subscriptions)
+                {
+                    <option value="@s.SubscriptionId">@s.DisplayName (@s.SubscriptionId)</option>
+                }
+            </select>
+        }
+        else
+        {
+            <div class="form-control form-control-sm bg-light">@(Subscriptions.FirstOrDefault()?.DisplayName ?? "-") <span class="text-muted">(@SubscriptionId)</span></div>
+        }
+    </div>
+    <div class="col-md-2">
+        <label class="form-label mb-0 small">@T("Time range")</label>
+        <select class="form-select form-select-sm" @bind="Days" disabled="@IsLoading">
+            <option value="1">@T("Last 24 hours")</option>
+            <option value="3">@T("Last 3 days")</option>
+            <option value="7">@T("Last 7 days")</option>
+            <option value="14">@T("Last 14 days")</option>
+            <option value="30">@T("Last 30 days")</option>
+        </select>
+    </div>
+    <div class="col-auto">
+        <button class="btn btn-sm btn-primary" disabled="@(IsLoading || string.IsNullOrEmpty(SubscriptionId))" @onclick="LoadAsync">
+            @(Loaded ? T("Refresh") : T("Load"))
+        </button>
+        @if (IsLoading)
+        {
+            <button class="btn btn-sm btn-outline-secondary" @onclick="CancelLoad">@T("Stop")</button>
+        }
+    </div>
+    <div class="col-auto small text-muted">
+        @if (IsLoading)
+        {
+            <span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+            <span> @T("{0}/{1} days read · {2} events", DoneWindows, TotalWindows, AllEvents.Count)</span>
+        }
+        else if (Loaded)
+        {
+            <span>@T("{0} events read", AllEvents.Count)</span>
+        }
+    </div>
+</div>
+
+@if (Loaded || AllEvents.Count > 0)
+{
+    <div class="row g-2 align-items-end mb-2">
+        <div class="col-md-3">
+            <label class="form-label mb-0 small">@T("Resource group")</label>
+            <select class="form-select form-select-sm" @bind="GroupFilter">
+                <option value="">@T("All")</option>
+                @foreach (var rg in ResourceGroups)
+                {
+                    <option value="@rg">@rg</option>
+                }
+            </select>
+        </div>
+        <div class="col-md-3">
+            <label class="form-label mb-0 small">@T("Search (operation, resource, who, IP)")</label>
+            <input class="form-control form-control-sm" @bind="TextFilter" @bind:event="oninput" placeholder='@T("e.g. virtualMachines/delete")' />
+        </div>
+        <div class="col-md-2">
+            <label class="form-label mb-0 small">@T("Result")</label>
+            <select class="form-select form-select-sm" @bind="StatusFilter">
+                <option value="">@T("All")</option>
+                <option value="Succeeded">@T("Succeeded only")</option>
+                <option value="Failed">@T("Failed only")</option>
+            </select>
+        </div>
+        <div class="col-auto">
+            <div class="form-check mb-1">
+                <input class="form-check-input" type="checkbox" id="hide-noise" @bind="HideNoise" />
+                <label class="form-check-label small" for="hide-noise">@T("Hide noise (Policy, Security, resource health)")</label>
+            </div>
+        </div>
+    </div>
+
+    <p class="small text-muted mb-1">
+        @T("{0} operations ({1} events)", Filtered.Count, Filtered.Sum(o => o.Events.Count))
+        @if (Filtered.Count > Visible)
+        {
+            <span> · @T("showing the first {0}", Visible)</span>
+        }
+    </p>
+
+    @if (Filtered.Count == 0)
+    {
+        <p><em>@T("No operations match these filters.")</em></p>
+    }
+    else
+    {
+        <div class="table-responsive">
+        <table class="table table-sm table-hover align-middle">
+            <thead>
+                <tr>
+                    @foreach (var (key, label) in Columns)
+                    {
+                        <th style="@(key == "time" ? "width: 12rem;" : "")" aria-sort="@AriaSort(key)">
+                            <button class="btn btn-link p-0 fw-semibold text-decoration-none text-reset" title='@T("Sort by {0}", label)'@onclick="() => SortBy(key)">
+                                @label <span aria-hidden="true">@SortIndicator(key)</span>
+                            </button>
+                        </th>
+                    }
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var op in Filtered.Take(Visible))
+                {
+                    var open = Expanded.Contains(op.CorrelationId);
+                    <tr style="cursor: pointer;" @onclick="() => Toggle(op.CorrelationId)" title='@T("Click for details")'>
+                        <td class="text-nowrap">@FormatTime(op)</td>
+                        <td>
+                            <span aria-hidden="true">@(open ? "▾" : "▸")</span> @op.Title
+                            @if (op.Events.Count > 1) { <span class="text-muted small">(@T("{0} events", op.Events.Count))</span> }
+                        </td>
+                        <td><span class="badge @StatusBadge(op.Status)">@StatusLabel(op.Status)</span></td>
+                        <td>@CallerLabel(op)</td>
+                        <td class="text-nowrap">@IpLabel(op.ClientIp)</td>
+                        <td>@op.ResourceGroup</td>
+                    </tr>
+                    @if (open)
+                    {
+                        <tr>
+                            <td colspan="6" class="bg-light">
+                                <table class="table table-sm mb-0">
+                                    <thead><tr><th>@T("Time")</th><th>@T("Operation")</th><th>@T("Resource")</th><th>@T("Result")</th></tr></thead>
+                                    <tbody>
+                                        @foreach (var e in op.Events.Where(e => e.Status is "Succeeded" or "Failed" || op.Events.All(x => x.Status is not ("Succeeded" or "Failed"))))
+                                        {
+                                            <tr>
+                                                <td class="text-nowrap">@e.When.ToLocalTime().ToString("HH:mm:ss")</td>
+                                                <td>@ActivityLogService.ShortOperation(e.Operation)</td>
+                                                <td>@e.ResourceName</td>
+                                                <td>
+                                                    <span class="badge @StatusBadge(e.Status)">@StatusLabel(e.Status)</span>
+                                                    @if (!string.IsNullOrEmpty(e.Message)) { <div class="small text-danger">@e.Message</div> }
+                                                </td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                                <div class="small text-muted mt-1">
+                                    @T("Identity: {0}", op.Caller)@(string.IsNullOrEmpty(op.AppId) ? "" : T(" · app {0}", op.AppId)) · @T("correlation {0}", op.CorrelationId)
+                                </div>
+                            </td>
+                        </tr>
+                    }
+                }
+            </tbody>
+        </table>
+        </div>
+
+        @if (Filtered.Count > Visible)
+        {
+            <button class="btn btn-sm btn-outline-secondary" @onclick="ShowMore">@T("Show more")</button>
+        }
+    }
+}
+
+@code {
+    private const int PageSize = 150;
+
+    private List<SubscriptionInfo> Subscriptions { get; set; } = new();
+    private string SubscriptionId { get; set; } = "";
+    private int Days { get; set; } = 7;
+
+    private string StatusMessage { get; set; } = "";
+    private bool IsError { get; set; }
+    private bool IsLoading { get; set; }
+    private bool Loaded { get; set; }
+    private int DoneWindows { get; set; }
+    private int TotalWindows { get; set; }
+
+    private readonly Dictionary<string, ActivityEvent> _byId = new();
+    private List<ActivityEvent> AllEvents { get; set; } = new();
+    private List<ActivityOperation> Operations { get; set; } = new();
+    private List<ActivityOperation> Filtered { get; set; } = new();
+    private List<string> ResourceGroups { get; set; } = new();
+    private HashSet<string> Expanded { get; } = new();
+    private Dictionary<string, string> KnownApps { get; set; } = new();
+    private Dictionary<string, string> IpLabels { get; set; } = new();
+    private int Visible { get; set; } = PageSize;
+
+    private string _groupFilter = "";
+    private string _textFilter = "";
+    private string _statusFilter = "";
+    private bool _hideNoise = true;
+    private string GroupFilter { get => _groupFilter; set { _groupFilter = value; ApplyFilters(); } }
+    private string TextFilter { get => _textFilter; set { _textFilter = value; ApplyFilters(); } }
+    private string StatusFilter { get => _statusFilter; set { _statusFilter = value; ApplyFilters(); } }
+    private bool HideNoise { get => _hideNoise; set { _hideNoise = value; ApplyFilters(); } }
+
+    private CancellationTokenSource? _cts;
+
+    protected override void OnInitialized() => PageState.Attach(this);
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            // Only the subscriptions the active connection sees; the default one (or the first) is preselected.
+            Subscriptions = await Inventory.ListSubscriptionsAsync();
+            SubscriptionId = ClientFactory.DefaultSubscriptionId is { Length: > 0 } d && Subscriptions.Any(s => s.SubscriptionId == d)
+                ? d
+                : Subscriptions.FirstOrDefault()?.SubscriptionId ?? "";
+            KnownApps = Connections.GetAll().ToDictionary(c => c.ClientId, c => c.Name, StringComparer.OrdinalIgnoreCase);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+    }
+
+    private async Task LoadAsync()
+    {
+        _cts?.Cancel();
+        _cts = new CancellationTokenSource();
+        var ct = _cts.Token;
+
+        _byId.Clear();
+        AllEvents = new();
+        Operations = new();
+        Filtered = new();
+        Expanded.Clear();
+        Visible = PageSize;
+        DoneWindows = 0;
+        TotalWindows = Days;
+        IsLoading = true;
+        Loaded = false;
+        SetStatus("", error: false);
+        StateHasChanged();
+
+        try
+        {
+            // The IP labels are a nicety: a failure there must not stop the log.
+            _ = ActivityOps.GetPublicIpLabelsAsync(SubscriptionId, ct).ContinueWith(
+                t => { if (t.IsCompletedSuccessfully) IpLabels = t.Result; }, TaskScheduler.Default);
+
+            var to = DateTimeOffset.UtcNow;
+            await ActivityOps.LoadAsync(SubscriptionId, to.AddDays(-Days), to, null, async (events, done, total) =>
+            {
+                await InvokeAsync(() =>
+                {
+                    foreach (var e in events) _byId[e.Id] = e;
+                    AllEvents = _byId.Values.ToList();
+                    DoneWindows = done;
+                    TotalWindows = total;
+                    Rebuild();
+                    StateHasChanged();
+                });
+            }, ct);
+
+            Loaded = true;
+        }
+        catch (OperationCanceledException)
+        {
+            SetStatus(T("Loading stopped: the results are partial."), error: false);
+            Loaded = true;
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private void CancelLoad() => _cts?.Cancel();
+
+    private void Rebuild()
+    {
+        Operations = ActivityLogService.Group(AllEvents);
+        ResourceGroups = AllEvents.Select(e => e.ResourceGroup).Where(r => r.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(r => r, StringComparer.OrdinalIgnoreCase).ToList();
+        ApplyFilters();
+    }
+
+    private static (string Key, string Label)[] Columns => new[]
+    {
+        ("time", T("When")), ("operation", T("Operation")), ("status", T("Result")),
+        ("caller", T("Who")), ("ip", "IP"), ("group", T("Resource group")),
+    };
+
+    // Newest first by default; a click on a header sorts by it, a second click reverses the order.
+    private string SortKey { get; set; } = "time";
+    private bool SortAscending { get; set; }
+
+    private void SortBy(string key)
+    {
+        if (SortKey == key)
+        {
+            SortAscending = !SortAscending;
+        }
+        else
+        {
+            SortKey = key;
+            SortAscending = key != "time";
+        }
+
+        ApplyFilters();
+    }
+
+    private string SortIndicator(string key) => SortKey != key ? "" : SortAscending ? "▲" : "▼";
+
+    private string AriaSort(string key) => SortKey != key ? "none" : SortAscending ? "ascending" : "descending";
+
+    private List<ActivityOperation> Sort(List<ActivityOperation> operations)
+    {
+        Func<ActivityOperation, object> key = SortKey switch
+        {
+            "operation" => o => o.Title.ToLowerInvariant(),
+            "status" => o => StatusLabel(o.Status),
+            "caller" => o => CallerLabel(o).ToLowerInvariant(),
+            "ip" => o => o.ClientIp,
+            "group" => o => o.ResourceGroup.ToLowerInvariant(),
+            _ => o => o.End,
+        };
+
+        // Rows with an empty value (e.g. events with no resource group, no IP) always go last, whichever the direction.
+        var withValueFirst = operations.OrderBy(o => key(o) is string { Length: 0 } ? 1 : 0);
+        var ordered = SortAscending ? withValueFirst.ThenBy(key) : withValueFirst.ThenByDescending(key);
+        return ordered.ThenByDescending(o => o.End).ToList();
+    }
+
+    private void ApplyFilters()
+    {
+        Visible = PageSize;
+        Filtered = Sort(Operations.Where(o =>
+            (!HideNoise || !o.IsNoise) &&
+            (GroupFilter.Length == 0 || string.Equals(o.ResourceGroup, GroupFilter, StringComparison.OrdinalIgnoreCase)) &&
+            (StatusFilter.Length == 0 || o.Status == StatusFilter) &&
+            (TextFilter.Length == 0 || Matches(o, TextFilter))).ToList());
+    }
+
+    private bool Matches(ActivityOperation o, string text) =>
+        o.Title.Contains(text, StringComparison.OrdinalIgnoreCase) ||
+        CallerLabel(o).Contains(text, StringComparison.OrdinalIgnoreCase) ||
+        o.ClientIp.Contains(text, StringComparison.OrdinalIgnoreCase) ||
+        o.Events.Any(e => e.ResourceName.Contains(text, StringComparison.OrdinalIgnoreCase) ||
+                          e.Operation.Contains(text, StringComparison.OrdinalIgnoreCase));
+
+    private void Toggle(string id)
+    {
+        if (!Expanded.Remove(id)) Expanded.Add(id);
+    }
+
+    private void ShowMore() => Visible += PageSize;
+
+    // A service principal shows up as its object id; the app id (client id) tells which saved connection it is.
+    private string CallerLabel(ActivityOperation o)
+    {
+        if (o.AppId.Length > 0 && KnownApps.TryGetValue(o.AppId, out var name)) return $"{name} (service principal)";
+        return o.Caller.Length > 0 ? o.Caller : "-";
+    }
+
+    private string IpLabel(string ip) =>
+        ip.Length == 0 ? "-" : IpLabels.TryGetValue(ip, out var label) ? $"{ip} ({label})" : ip;
+
+    private static string FormatTime(ActivityOperation o)
+    {
+        var start = o.Start.ToLocalTime();
+        var end = o.End.ToLocalTime();
+        return end - start < TimeSpan.FromSeconds(2)
+            ? start.ToString("dd/MM HH:mm:ss")
+            : $"{start:dd/MM HH:mm:ss} → {end:HH:mm:ss}";
+    }
+
+    private static string StatusBadge(string status) => status switch
+    {
+        "Succeeded" => "bg-success",
+        "Failed" => "bg-danger",
+        _ => "bg-secondary",
+    };
+
+    private static string StatusLabel(string status) => status switch
+    {
+        "Succeeded" => T("Succeeded"),
+        "Failed" => T("Failed"),
+        "Started" => T("Started"),
+        "Accepted" => T("Accepted"),
+        _ => status,
+    };
+
+    private void SetStatus(string message, bool error)
+    {
+        StatusMessage = message;
+        IsError = error;
+    }
+
+    public void Dispose() => _cts?.Cancel();
+}

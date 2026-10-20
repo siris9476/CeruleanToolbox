@@ -1,0 +1,504 @@
+@page "/monitoring"
+@using CeruleanToolbox.Services
+@inject ResourceInventoryService Inventory
+@inject MonitoringService MonitoringOps
+@inherits CeruleanToolboxPageBase
+
+<PageTitle>Monitoring</PageTitle>
+
+<h1>Monitoring</h1>
+<p>
+    @T("Read-only view of the monitoring and alerting configuration resources: Action Groups, Metric Alerts, Data Collection Rules, Web Tests, Workbooks, Smart Detector Alert Rules and Microsoft Defender for Cloud automations. It complements App Insights/Log Analytics, which query the actual telemetry data.")
+</p>
+
+<div class="row mb-3">
+    <div class="col-md-6">
+        <label class="form-label">@T("Subscription (optional)")</label>
+        <SearchableSelect TItem="SubscriptionInfo" Items="Subscriptions"
+                           GetLabel="@(s => $"{s.DisplayName} ({s.SubscriptionId})")" GetValue="@(s => s.SubscriptionId)"
+                           SelectedValue="SelectedSubscriptionId" SelectedValueChanged="OnSubscriptionChangedAsync"
+                           Placeholder='@T("-- all --")' Disabled="@IsLoading" />
+    </div>
+</div>
+
+@if (!string.IsNullOrEmpty(StatusMessage))
+{
+    <div class="alert @(IsError ? "alert-danger" : "alert-info")">@StatusMessage</div>
+}
+
+@if (string.IsNullOrEmpty(SelectedSubscriptionId) && !HasLoadedAllSubscriptions)
+{
+    <div class="alert alert-secondary">
+        @T("No subscription selected: choose one, or")
+        <button class="btn btn-sm btn-outline-primary" @onclick="() => OnSubscriptionChangedAsync(SelectedSubscriptionId)">@T("Load all subscriptions")</button>
+        @T("— it may take a while if you have many.")
+    </div>
+}
+else
+{
+    <ul class="nav nav-tabs mb-3">
+        @foreach (var tab in Tabs)
+        {
+            <li class="nav-item">
+                <button class="nav-link @(ActiveTab == tab ? "active" : "")" @onclick="() => SelectTabAsync(tab)">@tab</button>
+            </li>
+        }
+    </ul>
+
+    @if (IsLoading)
+    {
+        <div class="d-flex align-items-center gap-2 mb-3">
+            <div class="spinner-border spinner-border-sm text-primary" role="status" aria-hidden="true"></div>
+            <span>@T("Loading...")</span>
+        </div>
+    }
+    else
+    {
+        @if (DetailId is not null)
+        {
+            <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
+                <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" @onclick="CloseDetail">&larr; @ActiveTab</button>
+                <h4 class="mb-0">@DetailName</h4>
+                @if (DetailOverview is not null)
+                {
+                    <span class="badge bg-secondary">@DetailOverview.Status</span>
+                }
+                <button class="btn btn-sm btn-outline-secondary ms-auto" disabled="@IsBusy" @onclick="RefreshDetailAsync">@T("Refresh")</button>
+            </div>
+            <p class="text-muted small">@GetSubscriptionName(DetailId) · Resource group @ResourceGroupOf(DetailId)</p>
+
+            @if (DetailOverview is not null)
+            {
+                <ResourceOverviewView Overview="DetailOverview" />
+            }
+        }
+        else if (ActiveTab == "Action Group")
+        {
+            @if (ActionGroups.Count == 0)
+            {
+                <p><em>@T("No action groups found.")</em></p>
+            }
+            else
+            {
+                <table class="table table-sm">
+                    <thead><tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>@T("Enabled")</th><th>@T("# Receivers")</th></tr></thead>
+                    <tbody>
+                        @foreach (var ag in ActionGroups)
+                        {
+                            <tr style="cursor: pointer;" title='@T("Double-click to open the action group")' @ondblclick="() => OpenDetailAsync(ag.Id, ag.Name)">
+                                <td>
+                                    <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenDetailAsync(ag.Id, ag.Name)">
+                                        @ag.Name <span aria-hidden="true">&rsaquo;</span>
+                                    </button>
+                                </td>
+                                <td>@GetSubscriptionName(ag.Id)</td>
+                                <td>@ag.ResourceGroup</td>
+                                <td>@(ag.IsEnabled ? T("Yes") : T("No"))</td>
+                                <td>@ag.ReceiverCount</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        }
+        else if (ActiveTab == "Metric Alert")
+        {
+            @if (MetricAlerts.Count == 0)
+            {
+                <p><em>@T("No metric alerts found.")</em></p>
+            }
+            else
+            {
+                <table class="table table-sm">
+                    <thead><tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>@T("Enabled")</th><th>@T("Severity")</th><th>Scope</th></tr></thead>
+                    <tbody>
+                        @foreach (var alert in MetricAlerts)
+                        {
+                            <tr style="cursor: pointer;" title='@T("Double-click to open the alert")' @ondblclick="() => OpenDetailAsync(alert.Id, alert.Name)">
+                                <td>
+                                    <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenDetailAsync(alert.Id, alert.Name)">
+                                        @alert.Name <span aria-hidden="true">&rsaquo;</span>
+                                    </button>
+                                </td>
+                                <td>@GetSubscriptionName(alert.Id)</td>
+                                <td>@alert.ResourceGroup</td>
+                                <td>@(alert.IsEnabled ? T("Yes") : T("No"))</td>
+                                <td>@alert.Severity</td>
+                                <td>@string.Join(", ", alert.Scopes.Select(s => s.Split('/').Last()))</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        }
+        else if (ActiveTab == "Data Collection Rule")
+        {
+            @if (DataCollectionRules.Count == 0)
+            {
+                <p><em>@T("No data collection rules found.")</em></p>
+            }
+            else
+            {
+                <table class="table table-sm">
+                    <thead><tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>Location</th></tr></thead>
+                    <tbody>
+                        @foreach (var dcr in DataCollectionRules)
+                        {
+                            <tr style="cursor: pointer;" title='@T("Double-click to open the collection rule")' @ondblclick="() => OpenDetailAsync(dcr.Id, dcr.Name)">
+                                <td>
+                                    <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenDetailAsync(dcr.Id, dcr.Name)">
+                                        @dcr.Name <span aria-hidden="true">&rsaquo;</span>
+                                    </button>
+                                </td>
+                                <td>@GetSubscriptionName(dcr.Id)</td>
+                                <td>@dcr.ResourceGroup</td>
+                                <td>@dcr.Location</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        }
+        else if (ActiveTab == "Web Test")
+        {
+            @if (WebTests.Count == 0)
+            {
+                <p><em>@T("No web tests found.")</em></p>
+            }
+            else
+            {
+                <table class="table table-sm">
+                    <thead><tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>Location</th><th>@T("Type")</th><th>@T("Enabled")</th></tr></thead>
+                    <tbody>
+                        @foreach (var t in WebTests)
+                        {
+                            <tr style="cursor: pointer;" title='@T("Double-click to open the web test")' @ondblclick="() => OpenDetailAsync(t.Id, t.Name)">
+                                <td>
+                                    <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenDetailAsync(t.Id, t.Name)">
+                                        @t.Name <span aria-hidden="true">&rsaquo;</span>
+                                    </button>
+                                </td>
+                                <td>@GetSubscriptionName(t.Id)</td>
+                                <td>@t.ResourceGroup</td>
+                                <td>@t.Location</td>
+                                <td>@(t.Kind ?? "-")</td>
+                                <td>@(t.IsEnabled ? T("Yes") : T("No"))</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        }
+        else if (ActiveTab == "Workbook")
+        {
+            @if (Workbooks.Count == 0)
+            {
+                <p><em>@T("No workbooks found.")</em></p>
+            }
+            else
+            {
+                <table class="table table-sm">
+                    <thead><tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>Location</th></tr></thead>
+                    <tbody>
+                        @foreach (var w in Workbooks)
+                        {
+                            <tr style="cursor: pointer;" title='@T("Double-click to open the workbook")' @ondblclick="() => OpenDetailAsync(w.Id, w.Name)">
+                                <td>
+                                    <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenDetailAsync(w.Id, w.Name)">
+                                        @w.Name <span aria-hidden="true">&rsaquo;</span>
+                                    </button>
+                                </td>
+                                <td>@GetSubscriptionName(w.Id)</td>
+                                <td>@w.ResourceGroup</td>
+                                <td>@w.Location</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        }
+        else if (ActiveTab == "Smart Detector Alert Rule")
+        {
+            @if (SmartDetectorAlertRules.Count == 0)
+            {
+                <p><em>@T("No smart detector alert rules found.")</em></p>
+            }
+            else
+            {
+                <table class="table table-sm">
+                    <thead><tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>Location</th></tr></thead>
+                    <tbody>
+                        @foreach (var r in SmartDetectorAlertRules)
+                        {
+                            <tr style="cursor: pointer;" title='@T("Double-click to open the rule")' @ondblclick="() => OpenDetailAsync(r.Id, r.Name)">
+                                <td>
+                                    <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenDetailAsync(r.Id, r.Name)">
+                                        @r.Name <span aria-hidden="true">&rsaquo;</span>
+                                    </button>
+                                </td>
+                                <td>@GetSubscriptionName(r.Id)</td>
+                                <td>@r.ResourceGroup</td>
+                                <td>@r.Location</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        }
+        else if (ActiveTab == "Security Automation")
+        {
+            @if (SecurityAutomations.Count == 0)
+            {
+                <p><em>@T("No security automations found.")</em></p>
+            }
+            else
+            {
+                <table class="table table-sm">
+                    <thead><tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>Location</th></tr></thead>
+                    <tbody>
+                        @foreach (var a in SecurityAutomations)
+                        {
+                            <tr style="cursor: pointer;" title='@T("Double-click to open the automation")' @ondblclick="() => OpenDetailAsync(a.Id, a.Name)">
+                                <td>
+                                    <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenDetailAsync(a.Id, a.Name)">
+                                        @a.Name <span aria-hidden="true">&rsaquo;</span>
+                                    </button>
+                                </td>
+                                <td>@GetSubscriptionName(a.Id)</td>
+                                <td>@a.ResourceGroup</td>
+                                <td>@a.Location</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        }
+    }
+}
+
+@code {
+    private static readonly string[] Tabs = {
+        "Action Group", "Metric Alert", "Data Collection Rule", "Web Test", "Workbook",
+        "Smart Detector Alert Rule", "Security Automation"
+    };
+
+    private List<ActionGroupInfo> ActionGroups { get; set; } = new();
+    private List<MetricAlertInfo> MetricAlerts { get; set; } = new();
+    private List<DataCollectionRuleInfo> DataCollectionRules { get; set; } = new();
+    private List<WebTestInfo> WebTests { get; set; } = new();
+    private List<RawResourceInfo> Workbooks { get; set; } = new();
+    private List<RawResourceInfo> SmartDetectorAlertRules { get; set; } = new();
+    private List<RawResourceInfo> SecurityAutomations { get; set; } = new();
+
+    private string SelectedSubscriptionId { get; set; } = "";
+    private string ActiveTab { get; set; } = Tabs[0];
+    private readonly HashSet<string> _loadedTabsPerScope = new();
+
+    private string? DetailId { get; set; }
+    private string DetailName { get; set; } = "";
+    private ResourceOverview? DetailOverview { get; set; }
+
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            Subscriptions = await Inventory.ListSubscriptionsAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+
+        await AutoOpenAsync();
+    }
+
+    private static readonly Dictionary<string, string> TypeTabs = new()
+    {
+        ["microsoft.insights/actiongroups"] = "Action Group",
+        ["microsoft.insights/metricalerts"] = "Metric Alert",
+        ["microsoft.insights/datacollectionrules"] = "Data Collection Rule",
+        ["microsoft.insights/webtests"] = "Web Test",
+        ["microsoft.insights/workbooks"] = "Workbook",
+        ["microsoft.alertsmanagement/smartdetectoralertrules"] = "Smart Detector Alert Rule",
+        ["microsoft.security/automations"] = "Security Automation",
+    };
+
+    private async Task AutoOpenAsync()
+    {
+        var id = RequestedResourceId;
+        if (id is null || Subscriptions.Count == 0) return;
+        if (!TypeTabs.TryGetValue(RequestedResourceType ?? "", out var tab)) return;
+
+        ActiveTab = tab;
+        await OnSubscriptionChangedAsync(RequestedSubscriptionId ?? "");
+        await OpenDetailAsync(id, RequestedResourceName ?? id);
+    }
+
+    private async Task OnSubscriptionChangedAsync(string subscriptionId)
+    {
+        SelectedSubscriptionId = subscriptionId;
+        HasLoadedAllSubscriptions = string.IsNullOrEmpty(subscriptionId);
+        ClearAll();
+        _loadedTabsPerScope.Clear();
+        CloseDetail();
+
+        await LoadActiveTabAsync();
+    }
+
+    private void ClearAll()
+    {
+        ActionGroups.Clear();
+        MetricAlerts.Clear();
+        DataCollectionRules.Clear();
+        WebTests.Clear();
+        Workbooks.Clear();
+        SmartDetectorAlertRules.Clear();
+        SecurityAutomations.Clear();
+    }
+
+    private async Task SelectTabAsync(string tab)
+    {
+        ActiveTab = tab;
+        CloseDetail();
+        await LoadActiveTabAsync();
+    }
+
+    private static string ResourceGroupOf(string resourceId) =>
+        new Azure.Core.ResourceIdentifier(resourceId).ResourceGroupName ?? "-";
+
+    private async Task OpenDetailAsync(string id, string name)
+    {
+        if (IsBusy) return;
+
+        IsBusy = true;
+        SetStatus(T("Opening {0}...", name), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await LoadDetailAsync(id);
+            DetailId = id;
+            DetailName = name;
+            SetStatus("", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task LoadDetailAsync(string id)
+    {
+        DetailOverview = ActiveTab switch
+        {
+            "Action Group" => await MonitoringOps.GetActionGroupOverviewAsync(id),
+            "Metric Alert" => await MonitoringOps.GetMetricAlertOverviewAsync(id),
+            "Data Collection Rule" => await MonitoringOps.GetDataCollectionRuleOverviewAsync(id),
+            "Web Test" => await MonitoringOps.GetWebTestOverviewAsync(id),
+            "Workbook" => await MonitoringOps.GetWorkbookOverviewAsync(id),
+            "Smart Detector Alert Rule" => await MonitoringOps.GetSmartDetectorOverviewAsync(id),
+            "Security Automation" => await MonitoringOps.GetSecurityAutomationOverviewAsync(id),
+            _ => null,
+        };
+    }
+
+    private void CloseDetail()
+    {
+        DetailId = null;
+        DetailOverview = null;
+        SetStatus("", error: false);
+    }
+
+    private async Task RefreshDetailAsync()
+    {
+        if (IsBusy || DetailId is null) return;
+
+        IsBusy = true;
+        StateHasChanged();
+
+        try
+        {
+            await LoadDetailAsync(DetailId);
+            SetStatus("", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task LoadActiveTabAsync()
+    {
+        if (_loadedTabsPerScope.Contains(ActiveTab)) return;
+
+        var subscriptionIds = string.IsNullOrEmpty(SelectedSubscriptionId)
+            ? Subscriptions.Select(s => s.SubscriptionId).ToList()
+            : new List<string> { SelectedSubscriptionId };
+
+        if (subscriptionIds.Count == 0) return;
+
+        IsLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            switch (ActiveTab)
+            {
+                case "Action Group":
+                    var ags = new List<ActionGroupInfo>();
+                    foreach (var sub in subscriptionIds) ags.AddRange(await MonitoringOps.ListActionGroupsAsync(sub));
+                    ActionGroups = ags;
+                    break;
+                case "Metric Alert":
+                    var alerts = new List<MetricAlertInfo>();
+                    foreach (var sub in subscriptionIds) alerts.AddRange(await MonitoringOps.ListMetricAlertsAsync(sub));
+                    MetricAlerts = alerts;
+                    break;
+                case "Data Collection Rule":
+                    var dcrs = new List<DataCollectionRuleInfo>();
+                    foreach (var sub in subscriptionIds) dcrs.AddRange(await MonitoringOps.ListDataCollectionRulesAsync(sub));
+                    DataCollectionRules = dcrs;
+                    break;
+                case "Web Test":
+                    var tests = new List<WebTestInfo>();
+                    foreach (var sub in subscriptionIds) tests.AddRange(await MonitoringOps.ListWebTestsAsync(sub));
+                    WebTests = tests;
+                    break;
+                case "Workbook":
+                    var workbooks = new List<RawResourceInfo>();
+                    foreach (var sub in subscriptionIds) workbooks.AddRange(await MonitoringOps.ListWorkbooksAsync(sub));
+                    Workbooks = workbooks;
+                    break;
+                case "Smart Detector Alert Rule":
+                    var rules = new List<RawResourceInfo>();
+                    foreach (var sub in subscriptionIds) rules.AddRange(await MonitoringOps.ListSmartDetectorAlertRulesAsync(sub));
+                    SmartDetectorAlertRules = rules;
+                    break;
+                case "Security Automation":
+                    var automations = new List<RawResourceInfo>();
+                    foreach (var sub in subscriptionIds) automations.AddRange(await MonitoringOps.ListSecurityAutomationsAsync(sub));
+                    SecurityAutomations = automations;
+                    break;
+            }
+
+            _loadedTabsPerScope.Add(ActiveTab);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+}

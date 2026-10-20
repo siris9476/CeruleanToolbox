@@ -1,0 +1,505 @@
+@page "/sql"
+@using CeruleanToolbox.Services
+@inject ResourceInventoryService Inventory
+@inject SqlManagementService SqlOps
+@inherits CeruleanToolboxPageBase
+
+<PageTitle>SQL</PageTitle>
+
+<h1>Azure SQL</h1>
+
+@if (SelectedServer is null)
+{
+    <p>
+        @T("Lists the SQL servers. Click a server name, or double-click its row, to open its overview, databases and firewall rules.")
+    </p>
+
+    <div class="row mb-3">
+        <div class="col-md-6">
+            <label class="form-label">@T("Subscription (optional)")</label>
+            <SearchableSelect TItem="SubscriptionInfo" Items="Subscriptions"
+                               GetLabel="@(s => $"{s.DisplayName} ({s.SubscriptionId})")" GetValue="@(s => s.SubscriptionId)"
+                               SelectedValue="SelectedSubscriptionId" SelectedValueChanged="OnSubscriptionChangedAsync"
+                               Placeholder='@T("-- all --")' Disabled="@(IsLoading || IsBusy)" />
+        </div>
+        <div class="col-md-4">
+            <label class="form-label">@T("Filter by name")</label>
+            <input class="form-control" placeholder='@T("filter...")' @bind="NameFilter" @bind:event="oninput" />
+        </div>
+    </div>
+}
+
+@if (!string.IsNullOrEmpty(StatusMessage))
+{
+    <div class="alert @(IsError ? "alert-danger" : "alert-info")">@StatusMessage</div>
+}
+
+@if (SelectedServer is null)
+{
+    @if (string.IsNullOrEmpty(SelectedSubscriptionId) && !HasLoadedAllSubscriptions && !IsLoading)
+    {
+        <div class="alert alert-secondary">
+            @T("No subscription selected: pick one for a quick view, or")
+            <button class="btn btn-sm btn-outline-primary" @onclick="LoadAllSubscriptionsAsync">@T("Load all subscriptions")</button>
+            @T("— it may take a while if you have many.")
+        </div>
+    }
+
+    @if (IsLoading)
+    {
+        <div class="d-flex align-items-center gap-2 mb-3">
+            <div class="spinner-border spinner-border-sm text-primary" role="status" aria-hidden="true"></div>
+            <span>@T("Loading SQL servers...")</span>
+        </div>
+    }
+
+    @if (!IsLoading && (!string.IsNullOrEmpty(SelectedSubscriptionId) || HasLoadedAllSubscriptions))
+    {
+        @if (!FilteredServers.Any())
+        {
+            <p><em>@T("No SQL servers found.")</em></p>
+        }
+        else
+        {
+            <table class="table table-sm table-hover align-middle">
+                <thead>
+                    <tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>Location</th><th>FQDN</th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var server in FilteredServers)
+                    {
+                        <tr style="cursor: pointer;" title="@T("Double-click to open the server")" @ondblclick="() => OpenServerAsync(server)">
+                            <td>
+                                <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenServerAsync(server)">
+                                    @server.Name <span aria-hidden="true">&rsaquo;</span>
+                                </button>
+                            </td>
+                            <td>@GetSubscriptionName(server.Id)</td>
+                            <td>@server.ResourceGroup</td>
+                            <td>@server.Location</td>
+                            <td><code>@server.FullyQualifiedDomainName</code></td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+    }
+}
+else
+{
+    <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
+        <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" @onclick="CloseServer">&larr; @T("SQL servers")</button>
+        <h4 class="mb-0">@SelectedServer.Name</h4>
+        @if (ServerOverview is not null)
+        {
+            <span class="badge bg-secondary">@ServerOverview.Status</span>
+        }
+        <button class="btn btn-sm btn-outline-secondary ms-auto" disabled="@IsBusy" @onclick="RefreshServerAsync">@T("Refresh")</button>
+    </div>
+    <p class="text-muted small">
+        @GetSubscriptionName(SelectedServer.Id) · Resource group @SelectedServer.ResourceGroup · @SelectedServer.Location
+    </p>
+
+    <ul class="nav nav-tabs mb-3">
+        <li class="nav-item"><button class="nav-link @(ActiveTab == "overview" ? "active" : "")" @onclick='() => SelectTab("overview")'>@T("Overview")</button></li>
+        <li class="nav-item"><button class="nav-link @(ActiveTab == "databases" ? "active" : "")" @onclick='() => SelectTab("databases")'>Database</button></li>
+        <li class="nav-item"><button class="nav-link @(ActiveTab == "firewall" ? "active" : "")" @onclick='() => SelectTab("firewall")'>Firewall</button></li>
+    </ul>
+
+    @if (ActiveTab == "overview" && ServerOverview is not null)
+    {
+        <ResourceOverviewView Overview="ServerOverview" />
+    }
+    else if (ActiveTab == "databases")
+    {
+        @if (SelectedDatabase is null)
+        {
+            @if (Databases.Count == 0)
+            {
+                <p><em>@T("No user databases on this server.")</em></p>
+            }
+            else
+            {
+                <p class="text-muted small">@T("Click a database name, or double-click its row, to open its overview.")</p>
+                <table class="table table-sm table-hover align-middle">
+                    <thead><tr><th>@T("Name")</th><th>SKU</th><th>Tier</th><th>@T("Status")</th></tr></thead>
+                    <tbody>
+                        @foreach (var db in Databases)
+                        {
+                            <tr style="cursor: pointer;" title="@T("Double-click to open the database")" @ondblclick="() => OpenDatabaseAsync(db)">
+                                <td>
+                                    <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenDatabaseAsync(db)">
+                                        @db.Name <span aria-hidden="true">&rsaquo;</span>
+                                    </button>
+                                </td>
+                                <td>@db.SkuName</td>
+                                <td>@db.SkuTier</td>
+                                <td>@db.Status</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        }
+        else
+        {
+            <button class="btn btn-sm btn-outline-secondary mb-2" disabled="@IsBusy" @onclick="CloseDatabase">&larr; Database</button>
+            <h5>@SelectedDatabase.Name <span class="badge bg-secondary">@DatabaseOverview?.Status</span></h5>
+
+            @if (DatabaseOverview is not null)
+            {
+                <ResourceOverviewView Overview="DatabaseOverview" />
+            }
+
+            <hr />
+            <h6>@T("Actions")</h6>
+            <div class="mb-3">
+                <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" @onclick="() => ShowConnectionString(SelectedDatabase)">Connection string</button>
+                @if (ConnectionStringDbName == SelectedDatabase.Name)
+                {
+                    <div class="mt-2"><code>@ConnectionStringValue</code></div>
+                }
+            </div>
+
+            <label class="form-label small mb-1">@T("Scale SKU (current {0}, {1})", SelectedDatabase.SkuName, SelectedDatabase.SkuTier)</label>
+            <div class="row g-2 align-items-center mb-1">
+                <div class="col-md-3">
+                    <input class="form-control form-control-sm" placeholder='@T("New SKU name (e.g. S1, GP_S_Gen5_2)")' @bind="NewSkuName" />
+                </div>
+                <div class="col-md-3">
+                    <input class="form-control form-control-sm" placeholder='@T("Tier (e.g. Standard, GeneralPurpose)")' @bind="NewSkuTier" />
+                </div>
+                <div class="col-md-4">
+                    @if (!string.IsNullOrWhiteSpace(NewSkuName))
+                    {
+                        <ConfirmDeleteButton ConfirmText="@SelectedDatabase.Name" ButtonLabel='@T("Apply scale")'
+                                             ConfirmLabel='@T("Confirm scale")' IsBusy="IsBusy" OnConfirmed="ApplyScaleAsync" />
+                    }
+                </div>
+            </div>
+            <p class="form-text">@T("Changing the SKU can cause a brief connection interruption and a change in cost.")</p>
+        }
+    }
+    else if (ActiveTab == "firewall")
+    {
+        <table class="table table-sm">
+            <thead><tr><th>@T("Name")</th><th>Start IP</th><th>End IP</th><th></th></tr></thead>
+            <tbody>
+                @foreach (var rule in FirewallRules)
+                {
+                    <tr @key="rule.Name">
+                        <td>@rule.Name</td>
+                        <td>@rule.StartIPAddress</td>
+                        <td>@rule.EndIPAddress</td>
+                        <td>
+                            <ConfirmDeleteButton ConfirmText="@rule.Name" IsBusy="IsBusy" OnConfirmed="() => DeleteFirewallRuleAsync(rule.Name)" />
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+        <div class="row mb-3">
+            <div class="col-md-3"><input class="form-control form-control-sm" placeholder='@T("Rule name")' @bind="NewRuleName" /></div>
+            <div class="col-md-3"><input class="form-control form-control-sm" placeholder="Start IP" @bind="NewRuleStartIp" /></div>
+            <div class="col-md-3"><input class="form-control form-control-sm" placeholder="End IP" @bind="NewRuleEndIp" /></div>
+            <div class="col-md-3">
+                <button class="btn btn-sm btn-primary" disabled="@(IsBusy || string.IsNullOrWhiteSpace(NewRuleName))" @onclick="AddFirewallRuleAsync">@T("Add rule")</button>
+            </div>
+        </div>
+    }
+}
+
+@code {
+    private List<SqlServerInfo> Servers { get; set; } = new();
+    private List<SqlDatabaseInfo> Databases { get; set; } = new();
+    private List<SqlFirewallRuleInfo> FirewallRules { get; set; } = new();
+
+    private string SelectedSubscriptionId { get; set; } = "";
+    private string NameFilter { get; set; } = "";
+
+    private SqlServerInfo? SelectedServer { get; set; }
+    private ResourceOverview? ServerOverview { get; set; }
+    private string ActiveTab { get; set; } = "overview";
+
+    private SqlDatabaseInfo? SelectedDatabase { get; set; }
+    private ResourceOverview? DatabaseOverview { get; set; }
+
+    private string? ConnectionStringDbName { get; set; }
+    private string? ConnectionStringValue { get; set; }
+
+    private string NewSkuName { get; set; } = "";
+    private string NewSkuTier { get; set; } = "";
+
+    private string NewRuleName { get; set; } = "";
+    private string NewRuleStartIp { get; set; } = "";
+    private string NewRuleEndIp { get; set; } = "";
+
+    private IEnumerable<SqlServerInfo> FilteredServers => Servers.Where(s =>
+        string.IsNullOrWhiteSpace(NameFilter) || s.Name.Contains(NameFilter, StringComparison.OrdinalIgnoreCase));
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            Subscriptions = await Inventory.ListSubscriptionsAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+
+        await AutoOpenAsync();
+    }
+
+    private async Task AutoOpenAsync()
+    {
+        var id = RequestedResourceId;
+        if (id is null || Subscriptions.Count == 0) return;
+
+        await OnSubscriptionChangedAsync(RequestedSubscriptionId ?? "");
+        var item = Servers.FirstOrDefault(x => string.Equals(x.Id, id, StringComparison.OrdinalIgnoreCase));
+        if (item is not null)
+        {
+            await OpenServerAsync(item);
+        }
+    }
+
+    private async Task OnSubscriptionChangedAsync(string subscriptionId)
+    {
+        SelectedSubscriptionId = subscriptionId;
+        Servers = new();
+        HasLoadedAllSubscriptions = false;
+
+        // Clearing back to "all" doesn't auto-load: fetching every subscription is expensive,
+        // so it waits for the explicit button instead of firing on every selection change.
+        if (string.IsNullOrEmpty(SelectedSubscriptionId)) return;
+
+        await LoadAsync(new[] { SelectedSubscriptionId });
+    }
+
+    private async Task LoadAllSubscriptionsAsync()
+    {
+        HasLoadedAllSubscriptions = true;
+        await LoadAsync(Subscriptions.Select(s => s.SubscriptionId).ToList());
+    }
+
+    private async Task LoadAsync(IEnumerable<string> subscriptionIds)
+    {
+        IsLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            var servers = new List<SqlServerInfo>();
+            foreach (var id in subscriptionIds)
+            {
+                servers.AddRange(await SqlOps.ListServersAsync(id));
+            }
+
+            Servers = servers;
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private async Task OpenServerAsync(SqlServerInfo server)
+    {
+        if (IsBusy) return;
+
+        IsBusy = true;
+        SetStatus(T("Opening {0}...", server.Name), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await LoadServerDetailAsync(server);
+            SelectedServer = server;
+            ActiveTab = "overview";
+            CloseDatabase();
+            SetStatus("", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task LoadServerDetailAsync(SqlServerInfo server)
+    {
+        ServerOverview = await SqlOps.GetServerOverviewAsync(server.Id);
+        Databases = await SqlOps.ListDatabasesAsync(server.Id);
+        FirewallRules = await SqlOps.ListFirewallRulesAsync(server.Id);
+    }
+
+    private void CloseServer()
+    {
+        SelectedServer = null;
+        ServerOverview = null;
+        Databases = new();
+        FirewallRules = new();
+        CloseDatabase();
+        SetStatus("", error: false);
+    }
+
+    private async Task RefreshServerAsync()
+    {
+        if (IsBusy || SelectedServer is null) return;
+
+        IsBusy = true;
+        StateHasChanged();
+
+        try
+        {
+            await LoadServerDetailAsync(SelectedServer);
+            if (SelectedDatabase is not null)
+            {
+                DatabaseOverview = await SqlOps.GetDatabaseOverviewAsync(SelectedDatabase.Id);
+            }
+
+            SetStatus("", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private void SelectTab(string tab)
+    {
+        ActiveTab = tab;
+        if (tab != "databases") CloseDatabase();
+    }
+
+    private async Task OpenDatabaseAsync(SqlDatabaseInfo db)
+    {
+        if (IsBusy) return;
+
+        IsBusy = true;
+        SetStatus(T("Opening {0}...", db.Name), error: false);
+        StateHasChanged();
+
+        try
+        {
+            DatabaseOverview = await SqlOps.GetDatabaseOverviewAsync(db.Id);
+            SelectedDatabase = db;
+            ConnectionStringDbName = null;
+            NewSkuName = db.SkuName;
+            NewSkuTier = db.SkuTier;
+            SetStatus("", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private void CloseDatabase()
+    {
+        SelectedDatabase = null;
+        DatabaseOverview = null;
+        ConnectionStringDbName = null;
+    }
+
+    private void ShowConnectionString(SqlDatabaseInfo db)
+    {
+        ConnectionStringDbName = db.Name;
+        ConnectionStringValue = SqlManagementService.BuildConnectionStringTemplate(
+            SelectedServer!.FullyQualifiedDomainName, db.Name);
+    }
+
+    private async Task ApplyScaleAsync()
+    {
+        var db = SelectedDatabase;
+        if (IsBusy || db is null || SelectedServer is null) return;
+
+        IsBusy = true;
+        SetStatus(T("Scaling {0}...", db.Name), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await SqlOps.UpdateDatabaseSkuAsync(db.Id, NewSkuName, NewSkuTier);
+            Databases = await SqlOps.ListDatabasesAsync(SelectedServer.Id);
+            SelectedDatabase = Databases.FirstOrDefault(d => d.Id == db.Id) ?? db;
+            DatabaseOverview = await SqlOps.GetDatabaseOverviewAsync(db.Id);
+            SetStatus(T("Scaling complete."), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task AddFirewallRuleAsync()
+    {
+        IsBusy = true;
+        SetStatus(T("Adding firewall rule..."), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await SqlOps.AddFirewallRuleAsync(SelectedServer!.Id, NewRuleName, NewRuleStartIp, NewRuleEndIp);
+            FirewallRules = await SqlOps.ListFirewallRulesAsync(SelectedServer.Id);
+            NewRuleName = "";
+            NewRuleStartIp = "";
+            NewRuleEndIp = "";
+            SetStatus(T("Rule added."), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task DeleteFirewallRuleAsync(string ruleName)
+    {
+        // Guards against a double-click firing this twice before the "disabled" attribute
+        // re-renders in the browser: Blazor Server processes UI events one at a time per
+        // circuit, so this in-memory check is enough to make the second click a no-op.
+        if (IsBusy) return;
+        IsBusy = true;
+        SetStatus(T("Deleting rule {0}...", ruleName), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await SqlOps.DeleteFirewallRuleAsync(SelectedServer!.Id, ruleName);
+            FirewallRules = await SqlOps.ListFirewallRulesAsync(SelectedServer.Id);
+            SetStatus(T("Rule deleted."), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+}

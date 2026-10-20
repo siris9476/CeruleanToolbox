@@ -1,0 +1,305 @@
+@page "/identity"
+@using CeruleanToolbox.Services
+@inject ResourceInventoryService Inventory
+@inject IdentityService IdentityOps
+@inherits CeruleanToolboxPageBase
+
+<PageTitle>Identity</PageTitle>
+
+<h1>Identity</h1>
+<p>
+    @T("Read-only view of identities: user-assigned Managed Identities (Principal ID/Client ID, useful for assigning RBAC roles from")
+    <a href="/roles">@T("Roles")</a>@T(") and AAD B2C directories.")
+</p>
+
+<div class="row mb-3">
+    <div class="col-md-6">
+        <label class="form-label">@T("Subscription (optional)")</label>
+        <SearchableSelect TItem="SubscriptionInfo" Items="Subscriptions"
+                           GetLabel="@(s => $"{s.DisplayName} ({s.SubscriptionId})")" GetValue="@(s => s.SubscriptionId)"
+                           SelectedValue="SelectedSubscriptionId" SelectedValueChanged="OnSubscriptionChangedAsync"
+                           Placeholder='@T("-- all --")' Disabled="@IsLoading" />
+    </div>
+</div>
+
+@if (!string.IsNullOrEmpty(StatusMessage))
+{
+    <div class="alert @(IsError ? "alert-danger" : "alert-info")">@StatusMessage</div>
+}
+
+@if (string.IsNullOrEmpty(SelectedSubscriptionId) && !HasLoadedAllSubscriptions)
+{
+    <div class="alert alert-secondary">
+        @T("No subscription selected: pick one, or")
+        <button class="btn btn-sm btn-outline-primary" @onclick="() => OnSubscriptionChangedAsync(SelectedSubscriptionId)">@T("Load all subscriptions")</button>
+        @T("— it may take a while if you have many.")
+    </div>
+}
+else
+{
+    <ul class="nav nav-tabs mb-3">
+        @foreach (var tab in Tabs)
+        {
+            <li class="nav-item">
+                <button class="nav-link @(ActiveTab == tab ? "active" : "")" @onclick="() => SelectTabAsync(tab)">@tab</button>
+            </li>
+        }
+    </ul>
+
+    @if (IsLoading)
+    {
+        <div class="d-flex align-items-center gap-2 mb-3">
+            <div class="spinner-border spinner-border-sm text-primary" role="status" aria-hidden="true"></div>
+            <span>@T("Loading...")</span>
+        </div>
+    }
+    else
+    {
+        @if (DetailId is not null)
+        {
+            <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
+                <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" @onclick="CloseDetail">&larr; @ActiveTab</button>
+                <h4 class="mb-0">@DetailName</h4>
+                <button class="btn btn-sm btn-outline-secondary ms-auto" disabled="@IsBusy" @onclick="RefreshDetailAsync">@T("Refresh")</button>
+            </div>
+            <p class="text-muted small">@GetSubscriptionName(DetailId) · Resource group @ResourceGroupOf(DetailId)</p>
+
+            @if (DetailOverview is not null)
+            {
+                <ResourceOverviewView Overview="DetailOverview" />
+            }
+        }
+        else if (ActiveTab == "Managed Identity")
+        {
+            @if (ManagedIdentities.Count == 0)
+            {
+                <p><em>@T("No Managed Identities found.")</em></p>
+            }
+            else
+            {
+                <table class="table table-sm">
+                    <thead><tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>Location</th><th>Principal ID</th><th>Client ID</th></tr></thead>
+                    <tbody>
+                        @foreach (var identity in ManagedIdentities)
+                        {
+                            <tr style="cursor: pointer;" title='@T("Double-click to open the identity")' @ondblclick="() => OpenDetailAsync(identity.Id, identity.Name)">
+                                <td>
+                                    <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenDetailAsync(identity.Id, identity.Name)">
+                                        @identity.Name <span aria-hidden="true">&rsaquo;</span>
+                                    </button>
+                                </td>
+                                <td>@GetSubscriptionName(identity.Id)</td>
+                                <td>@identity.ResourceGroup</td>
+                                <td>@identity.Location</td>
+                                <td><code>@(identity.PrincipalId ?? "-")</code></td>
+                                <td><code>@(identity.ClientId ?? "-")</code></td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        }
+        else if (ActiveTab == "AAD B2C Directory")
+        {
+            @if (B2CDirectories.Count == 0)
+            {
+                <p><em>@T("No AAD B2C directories found.")</em></p>
+            }
+            else
+            {
+                <table class="table table-sm">
+                    <thead><tr><th>@T("Name")</th><th>Subscription</th><th>Resource Group</th><th>Location</th></tr></thead>
+                    <tbody>
+                        @foreach (var dir in B2CDirectories)
+                        {
+                            <tr style="cursor: pointer;" title='@T("Double-click to open the directory")' @ondblclick="() => OpenDetailAsync(dir.Id, dir.Name)">
+                                <td>
+                                    <button class="btn btn-link p-0 fw-semibold text-decoration-none" disabled="@IsBusy" @onclick="() => OpenDetailAsync(dir.Id, dir.Name)">
+                                        @dir.Name <span aria-hidden="true">&rsaquo;</span>
+                                    </button>
+                                </td>
+                                <td>@GetSubscriptionName(dir.Id)</td>
+                                <td>@dir.ResourceGroup</td>
+                                <td>@dir.Location</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        }
+    }
+}
+
+@code {
+    private static readonly string[] Tabs = { "Managed Identity", "AAD B2C Directory" };
+
+    private List<ManagedIdentityInfo> ManagedIdentities { get; set; } = new();
+    private List<RawResourceInfo> B2CDirectories { get; set; } = new();
+
+    private string SelectedSubscriptionId { get; set; } = "";
+    private string ActiveTab { get; set; } = Tabs[0];
+    private readonly HashSet<string> _loadedTabsPerScope = new();
+
+    private string? DetailId { get; set; }
+    private string DetailName { get; set; } = "";
+    private ResourceOverview? DetailOverview { get; set; }
+
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            Subscriptions = await Inventory.ListSubscriptionsAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+
+        await AutoOpenAsync();
+    }
+
+    private static readonly Dictionary<string, string> TypeTabs = new()
+    {
+        ["microsoft.managedidentity/userassignedidentities"] = "Managed Identity",
+        ["microsoft.azureactivedirectory/b2cdirectories"] = "AAD B2C Directory",
+    };
+
+    private async Task AutoOpenAsync()
+    {
+        var id = RequestedResourceId;
+        if (id is null || Subscriptions.Count == 0) return;
+        if (!TypeTabs.TryGetValue(RequestedResourceType ?? "", out var tab)) return;
+
+        ActiveTab = tab;
+        await OnSubscriptionChangedAsync(RequestedSubscriptionId ?? "");
+        await OpenDetailAsync(id, RequestedResourceName ?? id);
+    }
+
+    private async Task OnSubscriptionChangedAsync(string subscriptionId)
+    {
+        SelectedSubscriptionId = subscriptionId;
+        HasLoadedAllSubscriptions = string.IsNullOrEmpty(subscriptionId);
+        ManagedIdentities.Clear();
+        B2CDirectories.Clear();
+        _loadedTabsPerScope.Clear();
+        CloseDetail();
+
+        await LoadActiveTabAsync();
+    }
+
+    private async Task SelectTabAsync(string tab)
+    {
+        ActiveTab = tab;
+        CloseDetail();
+        await LoadActiveTabAsync();
+    }
+
+    private static string ResourceGroupOf(string resourceId) =>
+        new Azure.Core.ResourceIdentifier(resourceId).ResourceGroupName ?? "-";
+
+    private async Task OpenDetailAsync(string id, string name)
+    {
+        if (IsBusy) return;
+
+        IsBusy = true;
+        SetStatus(T("Opening {0}...", name), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await LoadDetailAsync(id);
+            DetailId = id;
+            DetailName = name;
+            SetStatus("", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task LoadDetailAsync(string id)
+    {
+        DetailOverview = ActiveTab switch
+        {
+            "Managed Identity" => await IdentityOps.GetManagedIdentityOverviewAsync(id),
+            "AAD B2C Directory" => await IdentityOps.GetB2CDirectoryOverviewAsync(id),
+            _ => null,
+        };
+    }
+
+    private void CloseDetail()
+    {
+        DetailId = null;
+        DetailOverview = null;
+        SetStatus("", error: false);
+    }
+
+    private async Task RefreshDetailAsync()
+    {
+        if (IsBusy || DetailId is null) return;
+
+        IsBusy = true;
+        StateHasChanged();
+
+        try
+        {
+            await LoadDetailAsync(DetailId);
+            SetStatus("", error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task LoadActiveTabAsync()
+    {
+        if (_loadedTabsPerScope.Contains(ActiveTab)) return;
+
+        var subscriptionIds = string.IsNullOrEmpty(SelectedSubscriptionId)
+            ? Subscriptions.Select(s => s.SubscriptionId).ToList()
+            : new List<string> { SelectedSubscriptionId };
+
+        if (subscriptionIds.Count == 0) return;
+
+        IsLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            switch (ActiveTab)
+            {
+                case "Managed Identity":
+                    var identities = new List<ManagedIdentityInfo>();
+                    foreach (var sub in subscriptionIds) identities.AddRange(await IdentityOps.ListManagedIdentitiesAsync(sub));
+                    ManagedIdentities = identities;
+                    break;
+                case "AAD B2C Directory":
+                    var dirs = new List<RawResourceInfo>();
+                    foreach (var sub in subscriptionIds) dirs.AddRange(await IdentityOps.ListB2CDirectoriesAsync(sub));
+                    B2CDirectories = dirs;
+                    break;
+            }
+
+            _loadedTabsPerScope.Add(ActiveTab);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+}

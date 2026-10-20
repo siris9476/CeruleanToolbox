@@ -1,0 +1,87 @@
+@using CeruleanToolbox.Services
+
+<div class="row">
+    @foreach (var group in Overview.Sections)
+    {
+        <div class="col-md-6 mb-3">
+            <h6>@group.Title</h6>
+            <dl class="row small mb-0">
+                @foreach (var item in group.Items)
+                {
+                    <dt class="col-5">@item.Key</dt>
+                    <dd class="col-7 text-break">@item.Value</dd>
+                }
+            </dl>
+        </div>
+    }
+</div>
+
+@foreach (var table in Overview.Tables)
+{
+    <h6>@table.Title (@table.Rows.Count)</h6>
+    @if (table.Rows.Count == 0)
+    {
+        <p class="small"><em>@T("No items.")</em></p>
+    }
+    else
+    {
+        var withActions = RowActions is not null && table.Title == ActionTableTitle;
+        <table class="table table-sm mb-3">
+            <thead>
+                <tr>
+                    @foreach (var column in table.Columns)
+                    {
+                        <th>@column</th>
+                    }
+                    @if (withActions)
+                    {
+                        <th></th>
+                    }
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var row in table.Rows)
+                {
+                    <tr>
+                        @foreach (var cell in row)
+                        {
+                            <td class="text-break">@cell</td>
+                        }
+                        @if (withActions)
+                        {
+                            <td class="text-nowrap">@RowActions!(row)</td>
+                        }
+                    </tr>
+                    @if (withActions && RowDetail is not null)
+                    {
+                        @RowDetail(row)
+                    }
+                }
+            </tbody>
+        </table>
+    }
+}
+
+@if (Overview.Tags.Count > 0)
+{
+    <h6>@T("Tags")</h6>
+    <p>
+        @foreach (var tag in Overview.Tags)
+        {
+            <span class="badge bg-light text-dark border me-1">@tag.Key: @tag.Value</span>
+        }
+    </p>
+}
+
+@code {
+    [Parameter, EditorRequired] public ResourceOverview Overview { get; set; } = default!;
+
+    /// <summary>
+    /// Optional: gives the table titled <see cref="ActionTableTitle"/> an extra last column with an action for each row
+    /// (<see cref="RowActions"/>, e.g. a button) and, if needed, a full-width row under it (<see cref="RowDetail"/>, a <c>&lt;tr&gt;</c>).
+    /// Both receive the row's cells.
+    /// </summary>
+    [Parameter] public string? ActionTableTitle { get; set; }
+    [Parameter] public RenderFragment<IReadOnlyList<string>>? RowActions { get; set; }
+    [Parameter] public RenderFragment<IReadOnlyList<string>>? RowDetail { get; set; }
+}

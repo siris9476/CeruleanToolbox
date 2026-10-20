@@ -1,0 +1,83 @@
+@page "/"
+@using CeruleanToolbox.Services
+@inject AzureClientFactory ClientFactory
+
+<PageTitle>CeruleanToolbox</PageTitle>
+
+<h1>CeruleanToolbox</h1>
+<p>@T("Run operations on Azure with the credentials of a Microsoft Entra ID app registration (service principal).")</p>
+
+@if (ClientFactory.IsConfigured)
+{
+    <div class="alert alert-success">
+        @T("Active connection on tenant") <code>@ClientFactory.TenantId</code>.
+        @T("You can manage it or add more in") <a href="/connections">@T("Connections")</a>.
+    </div>
+    <div class="row">
+        @foreach (var group in Sections)
+        {
+            <div class="col-lg-6 mb-3">
+                <h5>@group.Title</h5>
+                <ul>
+                    @foreach (var (href, name, description) in group.Items)
+                    {
+                        <li><a href="@href">@name</a> — @description</li>
+                    }
+                </ul>
+            </div>
+        }
+    </div>
+}
+else
+{
+    <div class="alert alert-warning">
+        <strong>@T("No connection configured.")</strong>
+        <p>
+            @T("Go to") <a href="/connections">@T("Connections")</a> @T("to enter the Tenant ID, Client ID and Client Secret of a Microsoft Entra ID app registration. The tool checks which tenants and subscriptions are reachable before saving the connection, encrypted on the local disk.")
+        </p>
+    </div>
+}
+
+@code {
+    private record Section(string Title, (string Href, string Name, string Description)[] Items);
+
+    // Computed on every read (not a static field) so the texts follow the current language.
+    private Section[] Sections =>
+    [
+        new(T("Compute"), [
+            ("/vm", "Virtual Machine", T("details, disks, extensions, events and agent diagnostics")),
+            ("/appservice", "App Service", T("start, stop and manage web apps")),
+            ("/functions", "Function Apps", T("start/stop and function keys")),
+            ("/aks", "AKS", T("Kubernetes clusters")),
+            ("/containerregistry", "Container Registry", T("registries and images")),
+            ("/computeextras", "Compute Extra", T("additional compute resources")),
+        ]),
+        new(T("Data and configuration"), [
+            ("/keyvault", "Key Vault", T("secrets, keys and certificates (with update of a single secret)")),
+            ("/sql", "SQL", T("servers and databases")),
+            ("/storage", "Storage", T("storage accounts")),
+            ("/appconfiguration", "App Configuration", T("keys and feature flags")),
+        ]),
+        new(T("Networking and security"), [
+            ("/appgateway", "Application Gateway", T("application gateways")),
+            ("/networking", "Networking", T("networks and network resources")),
+            ("/bastion", "Bastion", T("secure access to VMs")),
+            ("/roles", T("Roles"), T("role assignments with readable scopes")),
+            ("/identity", "Identity", T("identities and managed identities")),
+        ]),
+        new(T("Monitoring and diagnostics"), [
+            ("/activity", T("Activity log"), T("who did what and when in the active subscription")),
+            ("/monitoring", "Monitoring", T("metrics and alerts")),
+            ("/appinsights", "App Insights", T("application telemetry")),
+            ("/loganalytics", "Log Analytics", T("workspaces and log queries")),
+        ]),
+        new(T("Tools"), [
+            ("/resources", T("Resources"), T("browse resources, start/stop VMs and App Services")),
+            ("/console", T("PowerShell Console"), T("real terminal with az, kubectl and helm")),
+            ("/deploy", "Deploy", T("deploy an ARM/Bicep template to a resource group")),
+            ("/query", "Query", T("query Azure Resource Graph")),
+            ("/automation", "Automation", T("Automation accounts and runbooks")),
+            ("/connections", T("Connections"), T("manage connections (service principals)")),
+        ]),
+    ];
+}

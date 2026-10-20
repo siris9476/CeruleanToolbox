@@ -1,0 +1,63 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+    <!-- Deliberately NOT "CeruleanToolbox" (the AssemblyName would collide on disk with the
+         CeruleanToolbox.dll copied here from the project reference below). -->
+    <RootNamespace>CeruleanToolbox.Desktop</RootNamespace>
+    <InvariantGlobalization>false</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Using Include="Toolbox.Core" />
+    <Using Include="Toolbox.Core.Localization" />
+    <Using Include="Toolbox.Core.Localization.Tr" Static="true" />
+    <Using Include="Toolbox.Core.Services" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="app.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="wwwroot\index.html">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <!-- BlazorWebView serves static assets from its own wwwroot next to the exe (via the HostPage
+       set on the control), not from CeruleanToolbox's — this project isn't a Microsoft.NET.Sdk.Web
+       project, so it doesn't inherit CeruleanToolbox's static web asset handling. Copying CeruleanToolbox's
+       wwwroot here keeps both `dotnet run` and a real publish self-contained. -->
+  <ItemGroup>
+    <Content Include="..\CeruleanToolbox\wwwroot\**\*.*">
+      <Link>wwwroot\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CeruleanToolbox\CeruleanToolbox.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Components.WebView.WindowsForms" Version="8.0.100" />
+  </ItemGroup>
+
+  <!-- The Razor component CSS isolation bundle (CeruleanToolbox.styles.css, referenced by every
+       page's <head>) is generated into CeruleanToolbox's own obj folder at build time — it isn't
+       part of source wwwroot, so the Content globbing above can't pick it up. Copying it here,
+       after the referenced project has actually built, keeps it in sync automatically instead of
+       going stale whenever a .razor.css file changes. -->
+  <Target Name="CopyCeruleanToolboxScopedCssBundle" AfterTargets="Build;Publish">
+    <ItemGroup>
+      <_ScopedCssBundle Include="..\CeruleanToolbox\obj\$(Configuration)\net8.0\scopedcss\bundle\CeruleanToolbox.styles.css" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_ScopedCssBundle)" DestinationFiles="$(OutDir)wwwroot\CeruleanToolbox.styles.css" SkipUnchangedFiles="true" Condition="Exists('@(_ScopedCssBundle)')" />
+  </Target>
+
+</Project>

@@ -1,0 +1,115 @@
+@page "/query"
+@using CeruleanToolbox.Services
+@inject PageStateStore PageState
+@inject ResourceInventoryService Inventory
+@inject ResourceGraphQueryService GraphQuery
+
+<PageTitle>Query</PageTitle>
+
+<h1>Resource Graph Query</h1>
+<p>@T("Query resources with Azure Resource Graph (KQL), useful for inventory and reporting without changing anything.")</p>
+
+<div class="row mb-3">
+    <div class="col-md-6">
+        <label class="form-label">@T("Subscriptions (multiple selection, empty = all accessible ones)")</label>
+        <select class="form-select" multiple size="6" @onchange="OnSubscriptionsChanged">
+            @foreach (var sub in Subscriptions.OrderBy(s => s.DisplayName, StringComparer.OrdinalIgnoreCase))
+            {
+                <option value="@sub.SubscriptionId">@sub.DisplayName (@sub.SubscriptionId)</option>
+            }
+        </select>
+    </div>
+</div>
+
+<div class="mb-3">
+    <label class="form-label">Query KQL</label>
+    <textarea class="form-control" rows="6" @bind="QueryText"></textarea>
+    <div class="form-text">
+        @T("Examples:") <code>Resources | summarize count() by type</code> ·
+        <code>Resources | where type =~ 'microsoft.compute/virtualmachines' | project name, location, resourceGroup</code>
+    </div>
+</div>
+
+<button class="btn btn-primary" disabled="@(string.IsNullOrWhiteSpace(QueryText) || IsBusy)" @onclick="RunQueryAsync">
+    @(IsBusy ? T("Running...") : T("Run query"))
+</button>
+
+@if (!string.IsNullOrEmpty(StatusMessage))
+{
+    <div class="alert @(IsError ? "alert-danger" : "alert-info") mt-3">@StatusMessage</div>
+}
+
+@if (!string.IsNullOrEmpty(ResultJson))
+{
+    <h4 class="mt-3">@T("Results ({0} records)", TotalRecords)</h4>
+    <pre class="border rounded p-2" style="max-height: 500px; overflow: auto;">@ResultJson</pre>
+}
+
+@code {
+    private List<SubscriptionInfo> Subscriptions { get; set; } = new();
+    private List<string> SelectedSubscriptionIds { get; set; } = new();
+
+    private string QueryText { get; set; } = "Resources | summarize count() by type | order by count_ desc";
+    private string ResultJson { get; set; } = "";
+    private long TotalRecords { get; set; }
+
+    private string StatusMessage { get; set; } = "";
+    private bool IsError { get; set; }
+    private bool IsBusy { get; set; }
+
+    protected override void OnInitialized() => PageState.Attach(this);
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            Subscriptions = await Inventory.ListSubscriptionsAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+    }
+
+    private void OnSubscriptionsChanged(ChangeEventArgs e)
+    {
+        // multiple select values arrive as a single comma-joined string in Blazor's ChangeEventArgs
+        if (e.Value is string[] values)
+        {
+            SelectedSubscriptionIds = values.ToList();
+        }
+    }
+
+    private async Task RunQueryAsync()
+    {
+        IsBusy = true;
+        SetStatus(T("Running query..."), error: false);
+        StateHasChanged();
+
+        try
+        {
+            var subscriptionIds = SelectedSubscriptionIds.Count > 0
+                ? SelectedSubscriptionIds
+                : Subscriptions.Select(s => s.SubscriptionId).ToList();
+
+            var result = await GraphQuery.RunQueryAsync(subscriptionIds, QueryText);
+            ResultJson = result.JsonRows;
+            TotalRecords = result.TotalRecords;
+            SetStatus(T("Query completed."), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private void SetStatus(string message, bool error)
+    {
+        StatusMessage = message;
+        IsError = error;
+    }
+}
