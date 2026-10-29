@@ -12,14 +12,17 @@ public sealed class VmOperationsService
 
     private readonly AzureClientFactory _clientFactory;
     private readonly ArmRestClient _arm;
+    private readonly ExtensionCatalogService _catalog;
 
-    public VmOperationsService(AzureClientFactory clientFactory, ArmRestClient arm)
+    public VmOperationsService(AzureClientFactory clientFactory, ArmRestClient arm, ExtensionCatalogService catalog)
     {
         _clientFactory = clientFactory;
         _arm = arm;
+        _catalog = catalog;
     }
 
-    public async Task<ResourceOverview> GetOverviewAsync(string resourceId, CancellationToken ct = default)
+    /// <param name="refreshCatalog">Read the extension catalog again instead of using the cached copy (the Refresh button).</param>
+    public async Task<ResourceOverview> GetOverviewAsync(string resourceId, CancellationToken ct = default, bool refreshCatalog = false)
     {
         using var doc = await _arm.GetAsync(resourceId, ComputeApiVersion, "$expand=instanceView", ct);
         var root = doc.RootElement;
@@ -105,32 +108,52 @@ public sealed class VmOperationsService
         // comes from the instance view.
         var extensionRuns = ArmJson.Items(view, "extensions").ToDictionary(
             e => ArmJson.Str(e, "name"), e => e, StringComparer.OrdinalIgnoreCase);
-        var extensions = ArmJson.Items(root, "resources")
-            .Where(r => ArmJson.Str(r, "type").EndsWith("/extensions", StringComparison.OrdinalIgnoreCase))
-            .Select(r =>
+        // The "latest available" column comes from the extension catalog of the VM's region: one lookup per extension,
+        // started together and cached, so a slow or failing catalog never holds the page back (the cell shows "-").
+        var subscriptionId = resourceId.Split('/', StringSplitOptions.RemoveEmptyEntries) is { Length: > 1 } idParts ? idParts[1] : "-";
+        var extensionRows = new List<string[]>();
+        var latestLookups = new List<Task<CatalogAnswer?>>();
+        foreach (var extension in ArmJson.Items(root, "resources")
+                     .Where(x => ArmJson.Str(x, "type").EndsWith("/extensions", StringComparison.OrdinalIgnoreCase)))
+        {
+            var props = ArmJson.Obj(extension, "properties");
+            var name = ArmJson.Str(extension, "name").Split('/')[^1];
+            var status = extensionRuns.TryGetValue(name, out var run) ? ArmJson.Items(run, "statuses").FirstOrDefault() : default;
+            var level = ArmJson.Str(status, "level");
+            var publisher = ArmJson.Str(props, "publisher");
+            var extensionType = ArmJson.Str(props, "type");
+            var runningVersion = ArmJson.Str(run, "typeHandlerVersion");
+            var configuredVersion = ArmJson.Str(props, "typeHandlerVersion");
+
+            var versionForComparison = runningVersion != "-" ? runningVersion : configuredVersion;
+            latestLookups.Add(_catalog.LookupAsync(subscriptionId, location, publisher, extensionType, versionForComparison, ct, refreshCatalog));
+            extensionRows.Add(new[]
             {
-                var props = ArmJson.Obj(r, "properties");
-                var name = ArmJson.Str(r, "name").Split('/')[^1];
-                var status = extensionRuns.TryGetValue(name, out var run) ? ArmJson.Items(run, "statuses").FirstOrDefault() : default;
-                var level = ArmJson.Str(status, "level");
-                return (IReadOnlyList<string>)new[]
-                {
-                    name, $"{ArmJson.Str(props, "publisher")}.{ArmJson.Str(props, "type")}",
-                    ArmJson.ExtensionVersion(ArmJson.Str(run, "typeHandlerVersion"), ArmJson.Str(props, "typeHandlerVersion")),
-                    ArmJson.Str(props, "enableAutomaticUpgrade"),
-                    ArmJson.Str(props, "provisioningState"),
-                    ArmJson.Str(status, "displayStatus"),
-                    // Only the headline message of a non-successful status: the sub-statuses carry the script's own output.
-                    level is "Error" or "Warning" ? ExtensionMessage(ArmJson.Str(status, "message")) : "-",
-                };
-            }).ToList();
+                name, $"{publisher}.{extensionType}",
+                ArmJson.ExtensionVersion(runningVersion, configuredVersion),
+                "-", // latest available, filled in below
+                ArmJson.Str(props, "enableAutomaticUpgrade"),
+                ArmJson.Str(props, "provisioningState"),
+                ArmJson.Str(status, "displayStatus"),
+                // Only the headline message of a non-successful status: the sub-statuses carry the script's own output.
+                level is "Error" or "Warning" ? ExtensionMessage(ArmJson.Str(status, "message")) : "-",
+            });
+        }
+
+        var latestAnswers = await Task.WhenAll(latestLookups);
+        for (var i = 0; i < extensionRows.Count; i++)
+        {
+            extensionRows[i][3] = latestAnswers[i]?.Display ?? "-";
+        }
+
+        var extensions = extensionRows.Select(row => (IReadOnlyList<string>)row).ToList();
 
         var tables = new List<InfoTable>
         {
             new(T("Disks"), new[] { T("Type"), T("Name"), T("Size"), "Caching", T("Disk SKU"), T("On VM deletion"), T("Created at") }, disks),
             new(T("Network interfaces"), new[] { "NIC", T("Private IP"), T("Public IP"), "Subnet", "NSG", "Accelerated networking" },
                 nics.Select(n => (IReadOnlyList<string>)new[] { n.Name, n.PrivateIp, n.PublicIp, n.Subnet, n.Nsg, n.Accelerated }).ToList()),
-            new(T("Extensions"), new[] { T("Name"), T("Type"), T("Version"), T("Automatic upgrade"), "Provisioning", T("Execution"), T("Error detail") }, extensions),
+            new(T("Extensions"), new[] { T("Name"), T("Type"), T("Version"), T("Latest available"), T("Automatic upgrade"), "Provisioning", T("Execution"), T("Error detail") }, extensions),
         };
 
         var tags = ArmJson.Obj(root, "tags") is { ValueKind: System.Text.Json.JsonValueKind.Object } tagObject

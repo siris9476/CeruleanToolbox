@@ -58,6 +58,8 @@ The project is at an early stage and has been tested only by its author. Develop
   - in Key Vault, the lists of secrets, keys, certificates and deleted items, and secret versions, on real data;
   - installing on another PC;
   - behaviour with a service principal that has reduced permissions;
+  - on the VM page, the "Latest available" column of the extensions (read from the extension catalog of the region);
+  - copy and paste in the PowerShell console (selection, `Ctrl+C`, `Ctrl+V`, right click);
   - the desktop window for the most recent features.
 
 The full list of checks is in [CHECKLIST.md](CHECKLIST.md) (also in [Italian](CHECKLIST.it.md)).
@@ -67,7 +69,7 @@ The full list of checks is in [CHECKLIST.md](CHECKLIST.md) (also in [Italian](CH
 What **has** been tried, on the author's development environments and a sandbox (checks that write are listed separately):
 
 - **Resource viewing pages** (AKS, Virtual Machine, App Service, Function App, SQL, Storage, Key Vault, Container Registry, App Configuration, Application Gateway): the overviews read real ARM responses, first examined read-only on a real environment; the app also shows them with missing fields or default values.
-- **Activity log and VM detail:** verified in the browser on real VMs of a sandbox (disk, extensions with status and error, recent events, who did what). Not opened in the desktop window.
+- **Activity log and VM detail:** verified in the browser on real VMs of a sandbox (disk, extensions with status and error, recent events, who did what). Not opened in the desktop window. The extensions table shows the version that runs next to the one set in the VM definition, and whether automatic upgrade is on; the author looked at this on a sandbox VM, in the desktop window.
 - **VM diagnostics** (Linux and Windows): disk, network towards Azure and last custom script, tried on two real sandbox VMs; it reads and does not modify.
 - **PowerShell console:** a real terminal session in the browser and in the desktop window. `kubectl get nodes` and `helm list -A` ran on a development cluster through an agent VM, and the reachability check from the VM worked. The lists of clusters and VMs come from Resource Graph: with a connection that sees 127 subscriptions, 5 clusters took about 2.4 s and 121 VMs about 0.6 s. The author also ran `helm upgrade`, `kubectl apply` and `az aks upgrade` from the console; those runs were reported by the author and not re-checked here.
 - **Function App:** the invocation logs show error counts and the last error, and a read error from Application Insights (the `success` column is text) is fixed. On a real app, the status of the Key Vault references showed a denied-access case for a disabled version. The author tried the "Refresh references now" call (the refresh that Microsoft documents). The typed confirmation for Stop and Restart (header and list) was tried up to the confirmation.

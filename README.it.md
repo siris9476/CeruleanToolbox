@@ -72,6 +72,10 @@ Il progetto è nelle prime fasi e finora l'ha provato solo l'autore. Sviluppo e 
     versioni dei segreti sui dati reali;
   - l'installazione su un altro PC;
   - il comportamento con un service principal a permessi ridotti;
+  - nella pagina VM, la colonna «Ultima disponibile» delle estensioni (letta dal
+    catalogo delle estensioni della regione);
+  - copia e incolla nella console PowerShell (selezione, `Ctrl+C`, `Ctrl+V`,
+    tasto destro);
   - la finestra desktop per le funzioni più recenti.
 
 Le prove complete sono in [CHECKLIST.it.md](CHECKLIST.it.md).
@@ -87,7 +91,10 @@ Ecco cosa **è** stato provato, sugli ambienti di sviluppo dell'autore e su una 
   mancanti o valori predefiniti.
 - **Registro attività e dettaglio VM:** verificati nel browser su VM reali di una
   sandbox (disco, estensioni con stato ed errore, eventi recenti, chi ha fatto
-  cosa). Non aperti nella finestra desktop.
+  cosa). Non aperti nella finestra desktop. La tabella delle estensioni mostra la
+  versione in esecuzione accanto a quella impostata nella definizione della VM e
+  se l'aggiornamento automatico è attivo; l'autore l'ha vista su una VM di una
+  sandbox, nella finestra desktop.
 - **Diagnostica delle VM** (Linux e Windows): disco, rete verso Azure e ultimo
   custom script, provata su due VM reali di una sandbox; legge e non modifica.
 - **Console PowerShell:** una sessione reale (un terminale vero) nel browser e nella finestra desktop. `kubectl get nodes` e `helm list -A` hanno girato su un cluster di sviluppo tramite una VM agente, e la verifica di raggiungibilità del cluster dalla VM ha funzionato. L'elenco di cluster e VM viene da Resource Graph: con una connessione che vede 127 subscription, 5 cluster in circa 2,4 s e 121 VM in circa 0,6 s. L'autore ha provato da solo anche `helm upgrade`, `kubectl apply` e `az aks upgrade` dalla console: sono prove riferite dall'autore, non ricontrollate qui.

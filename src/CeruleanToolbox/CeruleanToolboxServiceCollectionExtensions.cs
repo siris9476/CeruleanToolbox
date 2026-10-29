@@ -18,6 +18,7 @@ public static class CeruleanToolboxServiceCollectionExtensions
         Tr.RegisterAssembly(typeof(CeruleanToolboxServiceCollectionExtensions).Assembly);
         services.AddScoped<PageStateStore>();
         services.AddScoped<ResourceInventoryService>();
+        services.AddScoped<ExtensionCatalogService>();
         services.AddScoped<VmOperationsService>();
         services.AddScoped<AppServiceOperationsService>();
         services.AddScoped<ResourceGraphQueryService>();

@@ -106,7 +106,7 @@ else
             <button class="btn btn-sm btn-success" disabled="@IsBusy" @onclick="() => StartAsync(SelectedVm)">Start</button>
             <button class="btn btn-sm btn-warning" disabled="@IsBusy" @onclick="() => StopAsync(SelectedVm)">Stop</button>
             <button class="btn btn-sm btn-secondary" disabled="@IsBusy" @onclick="() => RestartAsync(SelectedVm)">Restart</button>
-            <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" @onclick="RefreshVmAsync">@T("Refresh")</button>
+            <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" title="@T("Reloads the data and the latest versions of the extensions")" @onclick="RefreshVmAsync">@T("Refresh")</button>
         </div>
     </div>
     <p class="text-muted small">
@@ -251,9 +251,10 @@ else
         }
     }
 
-    private async Task LoadVmDetailAsync(VmInfo vm)
+    // refreshCatalog: only the Refresh button asks for a fresh read of the extension catalog; opening a VM uses the cached copy.
+    private async Task LoadVmDetailAsync(VmInfo vm, bool refreshCatalog = false)
     {
-        Overview = await VmOps.GetOverviewAsync(vm.Id);
+        Overview = await VmOps.GetOverviewAsync(vm.Id, refreshCatalog: refreshCatalog);
         SelectedNewSize = "";
 
         // Sizes are only needed for the resize card; a failure there must not block the overview.
@@ -339,7 +340,7 @@ else
 
         try
         {
-            await LoadVmDetailAsync(SelectedVm);
+            await LoadVmDetailAsync(SelectedVm, refreshCatalog: true);
             SetStatus("", error: false);
         }
         catch (Exception ex)
