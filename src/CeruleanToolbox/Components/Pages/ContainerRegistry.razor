@@ -104,11 +104,82 @@ else
     <ul class="nav nav-tabs mb-3">
         <li class="nav-item"><button class="nav-link @(ActiveTab == "overview" ? "active" : "")" @onclick='() => ActiveTab = "overview"'>@T("Overview")</button></li>
         <li class="nav-item"><button class="nav-link @(ActiveTab == "repos" ? "active" : "")" @onclick='() => ActiveTab = "repos"'>@T("Credentials and repositories")</button></li>
+        <li class="nav-item"><button class="nav-link @(ActiveTab == "firewall" ? "active" : "")" @onclick="OpenFirewallTabAsync">@T("Firewall")</button></li>
     </ul>
 
     @if (ActiveTab == "overview" && Overview is not null)
     {
         <ResourceOverviewView Overview="Overview" />
+    }
+    else if (ActiveTab == "firewall")
+    {
+        <p class="text-muted small">
+            @T("IP rules decide which addresses may read and change the images of this registry. The change takes a few minutes to apply. The list is read from Azure every time and written back as a whole, so rules added by others are kept.")
+        </p>
+        @if (Rules is null)
+        {
+            <p><em>@T("Loading...")</em></p>
+        }
+        else
+        {
+            @if (!string.Equals(Rules.Sku, "Premium", StringComparison.OrdinalIgnoreCase))
+            {
+                <div class="alert alert-warning">@T("This registry is {0}: Azure documents IP rules only for the Premium tier, so a change may be refused.", Rules.Sku)</div>
+            }
+            <p>
+                @T("Public network access"): <strong>@Rules.PublicNetworkAccess</strong> ·
+                @T("Default network rule"): <strong>@Rules.DefaultAction</strong>
+            </p>
+            @if (Rules.DefaultAction == "Allow")
+            {
+                <div class="alert alert-secondary">@T("The default rule is Allow: every address is already accepted, so IP rules have no effect until the default rule is Deny.")</div>
+            }
+
+            @if (Rules.IpRules.Count == 0)
+            {
+                <p><em>@T("No IP rules.")</em></p>
+            }
+            else
+            {
+                <table class="table table-sm">
+                    <thead><tr><th>@T("Value")</th><th></th></tr></thead>
+                    <tbody>
+                        @foreach (var rule in Rules.IpRules)
+                        {
+                            <tr @key="rule">
+                                <td><code>@rule</code></td>
+                                <td>
+                                    <ConfirmDeleteButton ConfirmText="@rule" ButtonLabel='@T("Remove rule")' ConfirmLabel='@T("Confirm removal")' IsBusy="IsBusy"
+                                                          OnConfirmed="() => ChangeRuleAsync(rule, add: false)" />
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+
+            <h4 class="mt-3">@T("Add an IP rule")</h4>
+            @if (!string.IsNullOrEmpty(BlockedIpFound) && !Rules.IpRules.Contains(BlockedIpFound))
+            {
+                <p class="small">
+                    @T("The registry refused the address {0}.", BlockedIpFound)
+                    <button class="btn btn-sm btn-outline-primary ms-1" disabled="@IsBusy" @onclick="() => NewRule = BlockedIpFound">@T("Use it")</button>
+                </p>
+            }
+            <div class="d-flex gap-2 align-items-center flex-wrap mb-2">
+                <input class="form-control form-control-sm" style="width: 14rem;" placeholder="1.2.3.4 / 1.2.3.0/24"
+                       @bind="NewRule" @bind:event="oninput" disabled="@(IsBusy || PendingRule is not null)" />
+                <button class="btn btn-sm btn-outline-primary" disabled="@(IsBusy || PendingRule is not null)" @onclick="AskAddRule">@T("Add")</button>
+            </div>
+            @if (PendingRule is not null)
+            {
+                <div class="alert alert-warning d-flex align-items-center gap-2 flex-wrap">
+                    <span>@T("Allow {0} to access the registry {1}?", PendingRule, SelectedRegistry.Name)</span>
+                    <button class="btn btn-sm btn-primary" disabled="@IsBusy" @onclick="ConfirmAddRuleAsync">@T("Confirm")</button>
+                    <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" @onclick="() => PendingRule = null">@T("Cancel")</button>
+                </div>
+            }
+        }
     }
     else if (ActiveTab == "repos")
     {
@@ -222,6 +293,81 @@ else
     private string NameFilter { get; set; } = "";
     private ResourceOverview? Overview { get; set; }
     private string ActiveTab { get; set; } = "overview";
+    private AcrNetworkRules? Rules { get; set; }
+    private string NewRule { get; set; } = "";
+    private string? PendingRule { get; set; }
+    private string? BlockedIpFound { get; set; }
+
+    private async Task OpenFirewallTabAsync()
+    {
+        ActiveTab = "firewall";
+        if (Rules is null) await LoadRulesAsync();
+    }
+
+    private async Task LoadRulesAsync()
+    {
+        if (SelectedRegistry is null) return;
+        try
+        {
+            Rules = await AcrOps.GetNetworkRulesAsync(SelectedRegistry.Id);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+    }
+
+    private void AskAddRule()
+    {
+        var rule = ContainerRegistryService.NormalizeIpRule(NewRule, out var problem);
+        if (rule is null)
+        {
+            SetStatus(problem, error: true);
+            return;
+        }
+
+        SetStatus("", error: false);
+        PendingRule = rule;
+    }
+
+    private async Task ConfirmAddRuleAsync()
+    {
+        if (PendingRule is null) return;
+        var rule = PendingRule;
+        PendingRule = null;
+        await ChangeRuleAsync(rule, add: true);
+        if (!IsError) NewRule = "";
+    }
+
+    private async Task ChangeRuleAsync(string rule, bool add)
+    {
+        if (IsBusy || SelectedRegistry is null) return;
+
+        IsBusy = true;
+        SetStatus(add ? T("Adding rule {0}...", rule) : T("Removing rule {0}...", rule), error: false);
+        StateHasChanged();
+
+        try
+        {
+            Rules = await AcrOps.ChangeIpRuleAsync(SelectedRegistry.Id, rule, add);
+            SetStatus(add ? T("Rule {0} added. It may take a few minutes to apply.", rule) : T("Rule {0} removed.", rule), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    // The registry's refusal names the address it saw: keep it so the Firewall tab can offer it.
+    private void RememberBlockedIp(Exception ex)
+    {
+        var ip = ContainerRegistryService.BlockedIp(ex.Message);
+        if (ip is not null) BlockedIpFound = ip;
+    }
 
     private IEnumerable<AcrRegistryInfo> FilteredRegistries => Registries.Where(r =>
         string.IsNullOrWhiteSpace(NameFilter) || r.Name.Contains(NameFilter, StringComparison.OrdinalIgnoreCase));
@@ -319,6 +465,10 @@ else
         Repositories = null;
         Tags = null;
         SelectedRepository = null;
+        Rules = null;
+        NewRule = "";
+        PendingRule = null;
+        BlockedIpFound = null;
     }
 
     private async Task OpenRegistryAsync(AcrRegistryInfo registry)
@@ -334,6 +484,7 @@ else
             Overview = await AcrOps.GetOverviewAsync(registry.Id);
             SelectedRegistryId = registry.Id;
             ActiveTab = "overview";
+            Rules = null;
             Credentials = null;
             Repositories = null;
             Tags = null;
@@ -468,6 +619,7 @@ else
         }
         catch (Exception ex)
         {
+            RememberBlockedIp(ex);
             SetStatus(ex.Message, error: true);
         }
         finally
@@ -493,6 +645,7 @@ else
         }
         catch (Exception ex)
         {
+            RememberBlockedIp(ex);
             SetStatus(ex.Message, error: true);
         }
         finally

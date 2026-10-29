@@ -11,6 +11,8 @@ public sealed record AcrRegistryInfo(
     string Name, string Location, string ResourceGroup, string LoginServer,
     string Sku, bool AdminUserEnabled, string Id);
 
+public sealed record AcrNetworkRules(string Sku, string PublicNetworkAccess, string DefaultAction, List<string> IpRules);
+
 public sealed record AcrPasswordInfo(string Name, string Value);
 
 public sealed record AcrCredentialsInfo(string Username, List<AcrPasswordInfo> Passwords);
@@ -174,6 +176,71 @@ public sealed class ContainerRegistryService
         await registry.UpdateAsync(Azure.WaitUntil.Completed, patch, ct);
     }
 
+    /// <summary>Reads the IP rules fresh from Azure: the list is replaced as a whole on every write, so the page never works on a stale copy.</summary>
+    public async Task<AcrNetworkRules> GetNetworkRulesAsync(string registryResourceId, CancellationToken ct = default)
+    {
+        using var doc = await _arm.GetAsync(registryResourceId, AcrApiVersion, ct: ct);
+        var p = ArmJson.Obj(doc.RootElement, "properties");
+        var rules = ArmJson.Obj(p, "networkRuleSet");
+        return new AcrNetworkRules(
+            ArmJson.Str(ArmJson.Obj(doc.RootElement, "sku"), "name"),
+            ArmJson.Str(p, "publicNetworkAccess"),
+            ArmJson.Str(rules, "defaultAction"),
+            ArmJson.Items(rules, "ipRules").Select(r => ArmJson.Str(r, "value")).ToList());
+    }
+
+    /// <summary>
+    /// Accepts an IPv4 address or a CIDR range; a "/32" is written as the plain address (the form Azure documents
+    /// for a single address). Returns null and the reason in <paramref name="problem"/> when the text is not usable.
+    /// </summary>
+    public static string? NormalizeIpRule(string text, out string problem)
+    {
+        problem = "";
+        var value = (text ?? "").Trim();
+        var parts = value.Split('/');
+        if (parts.Length > 2 || !System.Net.IPAddress.TryParse(parts[0], out var address)
+            || address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork
+            || parts[0].Count(c => c == '.') != 3)
+        {
+            problem = T("Enter an IPv4 address (1.2.3.4) or a range (1.2.3.0/24).");
+            return null;
+        }
+
+        if (parts.Length == 1) return address.ToString();
+
+        if (!int.TryParse(parts[1], out var prefix) || prefix < 1 || prefix > 32)
+        {
+            problem = T("The range length must be a number from 1 to 32 (a /0 range would open the registry to every address).");
+            return null;
+        }
+
+        return prefix == 32 ? address.ToString() : $"{address}/{prefix}";
+    }
+
+    /// <summary>Adds or removes one IP rule: reads the current list, changes it and writes it back, leaving the other rules and the default action as they are.</summary>
+    public async Task<AcrNetworkRules> ChangeIpRuleAsync(string registryResourceId, string rule, bool add, CancellationToken ct = default)
+    {
+        var current = await GetNetworkRulesAsync(registryResourceId, ct);
+        var values = current.IpRules.ToList();
+        if (add)
+        {
+            if (values.Contains(rule, StringComparer.OrdinalIgnoreCase)) return current;
+            values.Add(rule);
+        }
+        else if (values.RemoveAll(v => string.Equals(v, rule, StringComparison.OrdinalIgnoreCase)) == 0)
+        {
+            return current;
+        }
+
+        var defaultAction = current.DefaultAction == "-" ? "Allow" : current.DefaultAction;
+        var ruleSet = new ContainerRegistryNetworkRuleSet(new ContainerRegistryNetworkRuleDefaultAction(defaultAction));
+        foreach (var v in values) ruleSet.IPRules.Add(new ContainerRegistryIPRule(v));
+
+        var registry = _clientFactory.GetClient().GetContainerRegistryResource(new Azure.Core.ResourceIdentifier(registryResourceId));
+        await registry.UpdateAsync(Azure.WaitUntil.Completed, new ContainerRegistryPatch { NetworkRuleSet = ruleSet }, ct);
+        return await GetNetworkRulesAsync(registryResourceId, ct);
+    }
+
     public async Task<AcrCredentialsInfo> GetCredentialsAsync(string registryResourceId, CancellationToken ct = default)
     {
         var registry = _clientFactory.GetClient().GetContainerRegistryResource(new Azure.Core.ResourceIdentifier(registryResourceId));
@@ -267,12 +334,24 @@ public sealed class ContainerRegistryService
         return http;
     }
 
+    /// <summary>The IP that the registry names in its "client with IP '...' is not allowed access" refusal, or null.</summary>
+    public static string? BlockedIp(string text)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(text ?? "", @"client with IP '([0-9.]+)' is not allowed access");
+        return m.Success ? m.Groups[1].Value : null;
+    }
+
     private static async Task EnsureSuccessAsync(HttpResponseMessage response, CancellationToken ct)
     {
         if (response.IsSuccessStatusCode) return;
 
         var body = await response.Content.ReadAsStringAsync(ct);
-        throw new InvalidOperationException(
-            T("Registry call failed ({0} {1}): {2}", (int)response.StatusCode, response.StatusCode, body));
+        var message = T("Registry call failed ({0} {1}): {2}", (int)response.StatusCode, response.StatusCode, body);
+        if (BlockedIp(body) is not null)
+        {
+            message += " " + T("The registry firewall blocks this IP: add it in the Firewall tab.");
+        }
+
+        throw new InvalidOperationException(message);
     }
 }

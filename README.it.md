@@ -76,6 +76,10 @@ Il progetto è nelle prime fasi e finora l'ha provato solo l'autore. Sviluppo e 
     catalogo delle estensioni della regione);
   - copia e incolla nella console PowerShell (selezione, `Ctrl+C`, `Ctrl+V`,
     tasto destro);
+  - nella pagina Container Registry, la scheda Firewall: aggiunta e rimozione
+    delle regole IP (attiva, ma mai eseguita su un registry reale; riscrive
+    l'intero elenco delle regole del registry, quindi provala prima su un
+    registry di prova);
   - la finestra desktop per le funzioni più recenti.
 
 Le prove complete sono in [CHECKLIST.it.md](CHECKLIST.it.md).

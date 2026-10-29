@@ -60,6 +60,7 @@ The project is at an early stage and has been tested only by its author. Develop
   - behaviour with a service principal that has reduced permissions;
   - on the VM page, the "Latest available" column of the extensions (read from the extension catalog of the region);
   - copy and paste in the PowerShell console (selection, `Ctrl+C`, `Ctrl+V`, right click);
+  - on the Container Registry page, the Firewall tab: adding and removing IP rules (switched on, but never run against a real registry; it rewrites the whole list of rules of the registry, so try it first on a test registry);
   - the desktop window for the most recent features.
 
 The full list of checks is in [CHECKLIST.md](CHECKLIST.md) (also in [Italian](CHECKLIST.it.md)).
