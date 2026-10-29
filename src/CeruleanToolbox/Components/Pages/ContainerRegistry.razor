@@ -202,6 +202,11 @@ else
                 <button class="btn btn-sm btn-outline-secondary" disabled="@IsBusy" @onclick="ToggleCredentialsAsync">
                     @(Credentials is not null ? T("Hide credentials") : T("Show credentials"))
                 </button>
+                <ConfirmDeleteButton ConfirmText="@SelectedRegistry.Name" ButtonLabel='@T("Disable Admin User")' ConfirmLabel='@T("Confirm disabling")' IsBusy="IsBusy"
+                                      OnConfirmed="DisableAdminUserAsync" />
+                <div class="text-muted small mt-1">
+                    @T("Disabling it stops this page from reading the registry, and stops anyone who logs in with the admin name and password. Entra ID identities and roles are not affected.")
+                </div>
             </div>
             @if (Credentials is not null)
             {
@@ -693,6 +698,37 @@ else
             var index = Registries.FindIndex(r => r.Id == SelectedRegistryId);
             Registries[index] = Registries[index] with { AdminUserEnabled = true };
             SetStatus(T("Admin User enabled."), error: false);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task DisableAdminUserAsync()
+    {
+        if (IsBusy || SelectedRegistry is null) return;
+
+        IsBusy = true;
+        SetStatus(T("Disabling Admin User..."), error: false);
+        StateHasChanged();
+
+        try
+        {
+            await AcrOps.SetAdminUserEnabledAsync(SelectedRegistryId, enabled: false);
+            var index = Registries.FindIndex(r => r.Id == SelectedRegistryId);
+            Registries[index] = Registries[index] with { AdminUserEnabled = false };
+            Credentials = null;
+            Repositories = null;
+            Tags = null;
+            SelectedRepository = null;
+            Detail = null;
+            DetailTag = null;
+            SetStatus(T("Admin User disabled."), error: false);
         }
         catch (Exception ex)
         {

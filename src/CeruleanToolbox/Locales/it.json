@@ -1205,5 +1205,10 @@
   "(hidden)": "(nascosto)",
   "Build history ({0})": "Cronologia di costruzione ({0})",
   "The commands that created each layer, as recorded in the image. They can contain build arguments.": "I comandi che hanno creato ogni livello, come registrati nell'immagine. Possono contenere argomenti di build.",
-  "Reading the image \"{0}\"...": "Lettura dell'immagine \"{0}\"..."
+  "Reading the image \"{0}\"...": "Lettura dell'immagine \"{0}\"...",
+  "Disabling Admin User...": "Disabilitazione Admin User in corso...",
+  "Admin User disabled.": "Admin User disabilitato.",
+  "Disable Admin User": "Disabilita Admin User",
+  "Confirm disabling": "Conferma disabilitazione",
+  "Disabling it stops this page from reading the registry, and stops anyone who logs in with the admin name and password. Entra ID identities and roles are not affected.": "Disabilitarlo impedisce a questa pagina di leggere il registry e a chiunque acceda con nome e password admin. Le identità Entra ID e i ruoli non cambiano."
 }

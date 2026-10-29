@@ -81,6 +81,9 @@ Il progetto è nelle prime fasi e finora l'ha provato solo l'autore. Sviluppo e 
     nome fa pensare a un segreto, cronologia di costruzione e un'ipotesi sul
     runtime): sola lettura, provati solo su manifest di esempio, mai su un
     registry reale;
+  - nella pagina Container Registry, il pulsante «Disabilita Admin User»
+    (attivo, con il nome del registry da riscrivere; mai eseguito su un registry
+    reale);
   - nella pagina Container Registry, la scheda Firewall: aggiunta e rimozione
     delle regole IP (attiva, ma mai eseguita su un registry reale; riscrive
     l'intero elenco delle regole del registry, quindi provala prima su un
