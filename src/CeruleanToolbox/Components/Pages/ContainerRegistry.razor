@@ -2,6 +2,8 @@
 @using CeruleanToolbox.Services
 @inject ResourceInventoryService Inventory
 @inject ContainerRegistryService AcrOps
+@inject IJSRuntime JS
+@implements IAsyncDisposable
 @inherits CeruleanToolboxPageBase
 
 <PageTitle>Container Registry</PageTitle>
@@ -266,6 +268,7 @@ else
                                     <tr @key="tag">
                                         <td><code>@SelectedRegistry.LoginServer/@SelectedRepository:@tag</code></td>
                                         <td>
+                                            <button class="btn btn-sm btn-outline-primary" disabled="@IsBusy" @onclick="() => LoadImageDetailAsync(tag)">@T("Details")</button>
                                             <ConfirmDeleteButton ConfirmText="@tag" ButtonLabel='@T("Delete tag")' IsBusy="IsBusy"
                                                                   OnConfirmed="() => DeleteTagAsync(tag)" />
                                         </td>
@@ -273,6 +276,93 @@ else
                                 }
                             </tbody>
                         </table>
+
+                        @if (Detail is not null && DetailTag is not null)
+                        {
+                            <h4 id="image-detail">@T("Image details of")  <code>@SelectedRepository:@DetailTag</code></h4>
+                            @if (Detail.Note is not null)
+                            {
+                                <p class="text-muted small">@Detail.Note</p>
+                            }
+                            <table class="table table-sm w-auto">
+                                <tbody>
+                                    <tr><td>Digest</td><td><code>@Detail.Digest</code></td></tr>
+                                    <tr><td>@T("System / architecture")</td><td>@Detail.Os / @Detail.Architecture</td></tr>
+                                    @if (Detail.Platforms.Count > 0)
+                                    {
+                                        <tr><td>@T("Platforms in the tag")</td><td>@string.Join(", ", Detail.Platforms)</td></tr>
+                                    }
+                                    <tr><td>@T("Created")</td><td>@Detail.Created</td></tr>
+                                    <tr><td>@T("Size")</td><td>@($"{Detail.SizeBytes / 1024.0 / 1024.0:0.#} MB") · @T("{0} layers", Detail.Layers)</td></tr>
+                                    <tr><td>@T("User")</td><td>@Detail.User</td></tr>
+                                    <tr><td>@T("Working directory")</td><td>@Detail.WorkingDir</td></tr>
+                                    <tr><td>Entrypoint</td><td><code>@(Detail.Entrypoint.Length == 0 ? "-" : Detail.Entrypoint)</code></td></tr>
+                                    <tr><td>Cmd</td><td><code>@(Detail.Cmd.Length == 0 ? "-" : Detail.Cmd)</code></td></tr>
+                                    <tr><td>@T("Exposed ports")</td><td>@(Detail.Ports.Length == 0 ? "-" : Detail.Ports)</td></tr>
+                                    <tr>
+                                        <td>@T("Runtime (guess)")</td>
+                                        <td>
+                                            @if (Detail.Runtime.Count == 0)
+                                            {
+                                                <em>@T("Not recognized: the image has no known version variable or start command.")</em>
+                                            }
+                                            else
+                                            {
+                                                @foreach (var hint in Detail.Runtime)
+                                                {
+                                                    <div><strong>@hint.Runtime</strong> <span class="text-muted small">(@hint.Basis)</span></div>
+                                                }
+                                                <div class="text-muted small">@T("A guess from the base image variables and the start command, not a recorded fact.")</div>
+                                            }
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+
+                            <details class="mb-2">
+                                <summary>@T("Labels ({0})", Detail.Labels.Count)</summary>
+                                @if (Detail.Labels.Count == 0)
+                                {
+                                    <p><em>@T("The image has no labels.")</em></p>
+                                }
+                                else
+                                {
+                                    <table class="table table-sm">
+                                        <tbody>
+                                            @foreach (var label in Detail.Labels)
+                                            {
+                                                <tr><td>@label.Key</td><td><code>@label.Value</code></td></tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                }
+                            </details>
+                            <details class="mb-2">
+                                <summary>@T("Environment variables ({0})", Detail.Env.Count)</summary>
+                                <p class="text-muted small">@T("Values of variables whose name suggests a secret are hidden.")</p>
+                                <table class="table table-sm">
+                                    <tbody>
+                                        @foreach (var variable in Detail.Env)
+                                        {
+                                            <tr>
+                                                <td>@variable.Key</td>
+                                                <td><code>@(ContainerRegistryService.IsSensitiveName(variable.Key) ? T("(hidden)") : variable.Value)</code></td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            </details>
+                            <details class="mb-3">
+                                <summary>@T("Build history ({0})", Detail.History.Count)</summary>
+                                <p class="text-muted small">@T("The commands that created each layer, as recorded in the image. They can contain build arguments.")</p>
+                                <ol class="small">
+                                    @foreach (var step in Detail.History)
+                                    {
+                                        <li><code>@step</code></li>
+                                    }
+                                </ol>
+                            </details>
+                        }
                     }
                 }
             }
@@ -297,6 +387,66 @@ else
     private string NewRule { get; set; } = "";
     private string? PendingRule { get; set; }
     private string? BlockedIpFound { get; set; }
+    private AcrImageDetail? Detail { get; set; }
+    private string? DetailTag { get; set; }
+    private bool _scrollToDetail;
+    private IJSObjectReference? _scrollModule;
+
+    // The panel exists in the page only after the render that follows the load, so the scroll waits for that render.
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!_scrollToDetail || Detail is null) return;
+        _scrollToDetail = false;
+
+        try
+        {
+            _scrollModule ??= await JS.InvokeAsync<IJSObjectReference>("import", "./js/scroll.js");
+            await _scrollModule.InvokeVoidAsync("scrollToId", "image-detail");
+        }
+        catch (Exception ex) when (ex is JSException or JSDisconnectedException or InvalidOperationException)
+        {
+            // Scrolling is a convenience: if the browser connection is gone or the module is missing, the panel is still there.
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_scrollModule is null) return;
+        try
+        {
+            await _scrollModule.DisposeAsync();
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+    }
+
+    private async Task LoadImageDetailAsync(string tag)
+    {
+        if (Credentials is null || SelectedRegistry is null || SelectedRepository is null || IsBusy) return;
+
+        IsBusy = true;
+        SetStatus(T("Reading the image \"{0}\"...", tag), error: false);
+        StateHasChanged();
+
+        try
+        {
+            Detail = await AcrOps.GetImageDetailAsync(
+                SelectedRegistry.LoginServer, Credentials.Username, Credentials.Passwords[0].Value, SelectedRepository, tag);
+            DetailTag = tag;
+            _scrollToDetail = true;
+            SetStatus("", error: false);
+        }
+        catch (Exception ex)
+        {
+            RememberBlockedIp(ex);
+            SetStatus(ex.Message, error: true);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
 
     private async Task OpenFirewallTabAsync()
     {
@@ -466,6 +616,8 @@ else
         Tags = null;
         SelectedRepository = null;
         Rules = null;
+        Detail = null;
+        DetailTag = null;
         NewRule = "";
         PendingRule = null;
         BlockedIpFound = null;
@@ -633,6 +785,8 @@ else
         if (Credentials is null || SelectedRegistry is null) return;
 
         SelectedRepository = repository;
+        Detail = null;
+        DetailTag = null;
         IsBusy = true;
         SetStatus(T("Loading tags of \"{0}\"...", repository), error: false);
         StateHasChanged();

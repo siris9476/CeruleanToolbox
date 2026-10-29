@@ -13,6 +13,15 @@ public sealed record AcrRegistryInfo(
 
 public sealed record AcrNetworkRules(string Sku, string PublicNetworkAccess, string DefaultAction, List<string> IpRules);
 
+public sealed record AcrRuntimeHint(string Runtime, string Basis);
+
+public sealed record AcrImageDetail(
+    string Digest, string MediaType, List<string> Platforms, string? Note,
+    string Os, string Architecture, string Created, long SizeBytes, int Layers,
+    string User, string WorkingDir, string Entrypoint, string Cmd, string Ports,
+    List<KeyValuePair<string, string>> Env, List<KeyValuePair<string, string>> Labels,
+    List<string> History, List<AcrRuntimeHint> Runtime);
+
 public sealed record AcrPasswordInfo(string Name, string Value);
 
 public sealed record AcrCredentialsInfo(string Username, List<AcrPasswordInfo> Passwords);
@@ -293,6 +302,187 @@ public sealed class ContainerRegistryService
 
         return tagsElement.EnumerateArray().Select(e => e.GetString()!).ToList();
     }
+
+    private const string ManifestAccept =
+        "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, " +
+        "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json";
+
+    /// <summary>
+    /// Read-only: the manifest of a tag and the configuration blob it points to (the same two reads a "docker pull" does
+    /// before downloading layers). For a multi-platform tag it shows the linux/amd64 image, or the first real one.
+    /// </summary>
+    public async Task<AcrImageDetail> GetImageDetailAsync(
+        string loginServer, string username, string password, string repository, string tag, CancellationToken ct = default)
+    {
+        using var http = CreateAuthenticatedClient(username, password);
+        var (manifest, digest) = await GetManifestAsync(http, loginServer, repository, tag, ct);
+
+        var platforms = new List<string>();
+        string? note = null;
+        string mediaType;
+        using (var first = JsonDocument.Parse(manifest))
+        {
+            mediaType = ArmJson.Str(first.RootElement, "mediaType");
+            var entries = ArmJson.Items(first.RootElement, "manifests").ToList();
+            if (entries.Count > 0)
+            {
+                string Label(JsonElement e)
+                {
+                    var pf = ArmJson.Obj(e, "platform");
+                    var variant = ArmJson.Str(pf, "variant");
+                    return ArmJson.Str(pf, "os") + "/" + ArmJson.Str(pf, "architecture") + (variant == "-" ? "" : "/" + variant);
+                }
+
+                // BuildKit attaches provenance/SBOM as entries whose platform is "unknown/unknown": they are not images.
+                var images = entries.Where(e => ArmJson.Str(ArmJson.Obj(e, "platform"), "os") is not ("unknown" or "-")).ToList();
+                platforms.AddRange(images.Select(Label));
+                var pick = images.FirstOrDefault(e => Label(e) == "linux/amd64");
+                if (pick.ValueKind != JsonValueKind.Object) pick = images.FirstOrDefault();
+                if (pick.ValueKind != JsonValueKind.Object)
+                {
+                    throw new InvalidOperationException(T("The tag has no image manifest."));
+                }
+
+                note = T("Multi-platform image: showing {0}.", Label(pick));
+                (manifest, _) = await GetManifestAsync(http, loginServer, repository, ArmJson.Str(pick, "digest"), ct);
+            }
+        }
+
+        string configDigest;
+        using (var m = JsonDocument.Parse(manifest))
+        {
+            configDigest = ArmJson.Str(ArmJson.Obj(m.RootElement, "config"), "digest");
+        }
+
+        if (configDigest == "-")
+        {
+            throw new InvalidOperationException(T("The manifest does not point to a configuration."));
+        }
+
+        var blob = await http.GetAsync($"https://{loginServer}/v2/{repository}/blobs/{configDigest}", ct);
+        await EnsureSuccessAsync(blob, ct);
+        var config = await blob.Content.ReadAsStringAsync(ct);
+
+        return ParseImage(digest, mediaType, manifest, config, platforms, note);
+    }
+
+    private static async Task<(string Body, string Digest)> GetManifestAsync(
+        HttpClient http, string loginServer, string repository, string reference, CancellationToken ct)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"https://{loginServer}/v2/{repository}/manifests/{reference}");
+        request.Headers.TryAddWithoutValidation("Accept", ManifestAccept);
+        using var response = await http.SendAsync(request, ct);
+        await EnsureSuccessAsync(response, ct);
+
+        var digest = response.Headers.TryGetValues("Docker-Content-Digest", out var values) ? values.First() : "-";
+        return (await response.Content.ReadAsStringAsync(ct), digest);
+    }
+
+    /// <summary>Turns the image manifest and its configuration blob into what the page shows. Pure, so it can be checked on sample JSON.</summary>
+    public static AcrImageDetail ParseImage(
+        string digest, string mediaType, string manifestJson, string configJson, List<string> platforms, string? note)
+    {
+        using var manifest = JsonDocument.Parse(manifestJson);
+        using var root = JsonDocument.Parse(configJson);
+        var cfg = ArmJson.Obj(root.RootElement, "config");
+
+        long size = 0;
+        var layers = 0;
+        foreach (var layer in ArmJson.Items(manifest.RootElement, "layers"))
+        {
+            layers++;
+            if (layer.TryGetProperty("size", out var s) && s.TryGetInt64(out var n)) size += n;
+        }
+
+        var cfgRef = ArmJson.Obj(manifest.RootElement, "config");
+        if (cfgRef.ValueKind == JsonValueKind.Object && cfgRef.TryGetProperty("size", out var cs) && cs.TryGetInt64(out var cn)) size += cn;
+
+        string Joined(string key) => string.Join(" ", ArmJson.Items(cfg, key).Select(e => e.GetString() ?? ""));
+
+        var env = new List<KeyValuePair<string, string>>();
+        foreach (var e in ArmJson.Items(cfg, "Env"))
+        {
+            var text = e.GetString() ?? "";
+            var eq = text.IndexOf('=');
+            env.Add(eq < 0 ? new(text, "") : new(text[..eq], text[(eq + 1)..]));
+        }
+
+        List<KeyValuePair<string, string>> Pairs(string key) =>
+            ArmJson.Obj(cfg, key) is { ValueKind: JsonValueKind.Object } o
+                ? o.EnumerateObject().Select(p => new KeyValuePair<string, string>(p.Name, p.Value.ValueKind == JsonValueKind.String ? p.Value.GetString() ?? "" : "")).ToList()
+                : new List<KeyValuePair<string, string>>();
+
+        var history = ArmJson.Items(root.RootElement, "history")
+            .Select(h => ArmJson.Str(h, "created_by"))
+            .Where(c => c != "-")
+            .Select(c => c.StartsWith("/bin/sh -c #(nop) ") ? c["/bin/sh -c #(nop) ".Length..].Trim() : c)
+            .Select(c => c.Length > 200 ? c[..200] + "..." : c)
+            .ToList();
+
+        var entrypoint = Joined("Entrypoint");
+        var cmd = Joined("Cmd");
+        var ports = string.Join(", ", Pairs("ExposedPorts").Select(p => p.Key));
+
+        return new AcrImageDetail(
+            digest, mediaType, platforms, note,
+            ArmJson.Str(root.RootElement, "os"), ArmJson.Str(root.RootElement, "architecture"),
+            ArmJson.Date(ArmJson.Str(root.RootElement, "created")), size, layers,
+            ArmJson.Str(cfg, "User"), ArmJson.Str(cfg, "WorkingDir"), entrypoint, cmd, ports,
+            env, Pairs("Labels"), history, InferRuntime(env, entrypoint, cmd));
+    }
+
+    // Version variables set by the official base images. The first rule that matches a variable names the runtime.
+    private static readonly (string Variable, string Runtime)[] RuntimeVariables =
+    {
+        ("ASPNET_VERSION", "ASP.NET Core"), ("DOTNET_VERSION", ".NET"), ("NODE_VERSION", "Node.js"),
+        ("PYTHON_VERSION", "Python"), ("JAVA_VERSION", "Java"), ("GOLANG_VERSION", "Go"),
+        ("RUBY_VERSION", "Ruby"), ("PHP_VERSION", "PHP"),
+    };
+
+    // First word of the start command, when no version variable tells.
+    private static readonly (string Command, string Runtime)[] RuntimeCommands =
+    {
+        ("dotnet", ".NET"), ("node", "Node.js"), ("npm", "Node.js"), ("java", "Java"), ("python", "Python"),
+        ("python3", "Python"), ("gunicorn", "Python"), ("uvicorn", "Python"), ("nginx", "nginx"), ("php-fpm", "PHP"),
+        ("apache2-foreground", "Apache httpd"),
+    };
+
+    /// <summary>A guess, never a fact: what the base image variables and the start command suggest. Each hint says what it is based on.</summary>
+    public static List<AcrRuntimeHint> InferRuntime(IEnumerable<KeyValuePair<string, string>> env, string entrypoint, string cmd)
+    {
+        var hints = new List<AcrRuntimeHint>();
+        var vars = env.ToList();
+        foreach (var (variable, runtime) in RuntimeVariables)
+        {
+            var found = vars.FirstOrDefault(v => v.Key == variable);
+            if (found.Key is null || found.Value.Length == 0) continue;
+            hints.Add(new AcrRuntimeHint($"{runtime} {found.Value}", T("variable {0}", variable)));
+        }
+
+        if (hints.Count == 0 && vars.Any(v => v.Key == "JAVA_HOME"))
+        {
+            hints.Add(new AcrRuntimeHint("Java", T("variable {0}", "JAVA_HOME")));
+        }
+
+        var first = (entrypoint + " " + cmd).Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "";
+        first = first[(first.LastIndexOf('/') + 1)..];
+        foreach (var (command, runtime) in RuntimeCommands)
+        {
+            if (first != command) continue;
+            if (!hints.Any(h => h.Runtime.StartsWith(runtime, StringComparison.OrdinalIgnoreCase)))
+            {
+                hints.Add(new AcrRuntimeHint(runtime, T("start command \"{0}\"", first)));
+            }
+
+            break;
+        }
+
+        return hints;
+    }
+
+    // Image variables can carry secrets baked in at build time: show the name, never the value.
+    public static bool IsSensitiveName(string name) =>
+        System.Text.RegularExpressions.Regex.IsMatch(name, "PASS|PWD|SECRET|TOKEN|KEY|CONNECTION|CREDENTIAL|SAS", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
 
     /// <summary>
     /// Uses the ACR-specific REST extension (<c>/acr/v1/...</c>, not the standard Docker Registry

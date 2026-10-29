@@ -76,6 +76,11 @@ Il progetto è nelle prime fasi e finora l'ha provato solo l'autore. Sviluppo e 
     catalogo delle estensioni della regione);
   - copia e incolla nella console PowerShell (selezione, `Ctrl+C`, `Ctrl+V`,
     tasto destro);
+  - nella pagina Container Registry, i «Dettagli» di un tag (sistema, dimensione,
+    comando di avvio, etichette, variabili d'ambiente con i valori nascosti se il
+    nome fa pensare a un segreto, cronologia di costruzione e un'ipotesi sul
+    runtime): sola lettura, provati solo su manifest di esempio, mai su un
+    registry reale;
   - nella pagina Container Registry, la scheda Firewall: aggiunta e rimozione
     delle regole IP (attiva, ma mai eseguita su un registry reale; riscrive
     l'intero elenco delle regole del registry, quindi provala prima su un
