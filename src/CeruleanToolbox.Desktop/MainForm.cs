@@ -22,7 +22,18 @@ public sealed class MainForm : Form
             Services = services,
         };
         blazorWebView.RootComponents.Add<Routes>("#app");
-        blazorWebView.BlazorWebViewInitialized += async (_, e) => await ForwardWebViewErrorsAsync(e.WebView.CoreWebView2);
+        blazorWebView.BlazorWebViewInitialized += async (_, e) =>
+        {
+            // The console pastes with a right click, which reads the clipboard; the window only shows this app's own pages.
+            e.WebView.CoreWebView2.PermissionRequested += (sender, args) =>
+            {
+                if (args.PermissionKind == CoreWebView2PermissionKind.ClipboardRead)
+                {
+                    args.State = CoreWebView2PermissionState.Allow;
+                }
+            };
+            await ForwardWebViewErrorsAsync(e.WebView.CoreWebView2);
+        };
 
         Controls.Add(blazorWebView);
     }
