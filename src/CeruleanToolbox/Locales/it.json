@@ -117,6 +117,7 @@
   "Automatic": "Automatica",
   "Automatic repairs": "Riparazione automatica",
   "Automatic scaling is on ({0}): the number of nodes is managed by the autoscaler.": "Scaling automatico attivo ({0}): il numero di nodi è gestito dall'autoscaler.",
+  "Automatic upgrade": "Upgrade automatico",
   "Automatic upgrades": "Upgrade automatici",
   "Automation accounts and runbooks": "account e runbook di Automation",
   "Automation disabled": "Disabilitata",

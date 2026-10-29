@@ -109,12 +109,31 @@ public sealed class ComputeExtrasService
         };
 
         var instances = new List<IReadOnlyList<string>>();
+        // Versions actually installed, per extension name, collected from the instance view of every instance.
+        var runningVersions = new Dictionary<string, SortedSet<string>>(StringComparer.OrdinalIgnoreCase);
         using var instanceDoc = await TryGetAsync($"{resourceId}/virtualMachines", ComputeApiVersion, ct, "$expand=instanceView");
         if (instanceDoc is not null)
         {
             foreach (var vm in ArmJson.Items(instanceDoc.RootElement, "value"))
             {
                 var vp = ArmJson.Obj(vm, "properties");
+                foreach (var run in ArmJson.Items(ArmJson.Obj(vp, "instanceView"), "extensions"))
+                {
+                    var runName = ArmJson.Str(run, "name");
+                    var runVersion = ArmJson.Str(run, "typeHandlerVersion");
+                    if (runName == "-" || runVersion == "-")
+                    {
+                        continue;
+                    }
+
+                    if (!runningVersions.TryGetValue(runName, out var versions))
+                    {
+                        runningVersions[runName] = versions = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+                    }
+
+                    versions.Add(runVersion);
+                }
+
                 var power = ArmJson.Items(ArmJson.Obj(vp, "instanceView"), "statuses")
                     .Select(x => ArmJson.Str(x, "code")).FirstOrDefault(c => c.StartsWith("PowerState/", StringComparison.OrdinalIgnoreCase))?["PowerState/".Length..] ?? "-";
                 instances.Add(new[]
@@ -128,16 +147,20 @@ public sealed class ComputeExtrasService
         var extensions = ArmJson.Items(ArmJson.Obj(profile, "extensionProfile"), "extensions").Select(e =>
         {
             var ep = ArmJson.Obj(e, "properties");
+            var extensionName = ArmJson.Str(e, "name");
+            var running = runningVersions.TryGetValue(extensionName, out var seen) ? string.Join(", ", seen) : "-";
             return (IReadOnlyList<string>)new[]
             {
-                ArmJson.Str(e, "name"), $"{ArmJson.Str(ep, "publisher")}.{ArmJson.Str(ep, "type")}", ArmJson.Str(ep, "typeHandlerVersion"),
+                extensionName, $"{ArmJson.Str(ep, "publisher")}.{ArmJson.Str(ep, "type")}",
+                ArmJson.ExtensionVersion(running, ArmJson.Str(ep, "typeHandlerVersion")),
+                ArmJson.Str(ep, "enableAutomaticUpgrade"),
             };
         }).ToList();
 
         var tables = new List<InfoTable>
         {
             new(T("Instances"), new[] { T("Name"), T("Instance ID"), "Provisioning", "Power state", T("Latest model applied") }, instances),
-            new(T("Extensions"), new[] { T("Name"), T("Type"), T("Version") }, extensions),
+            new(T("Extensions"), new[] { T("Name"), T("Type"), T("Version"), T("Automatic upgrade") }, extensions),
         };
 
         return new ResourceOverview(provisioning, sections, tables, Tags(vmss));

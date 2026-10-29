@@ -150,6 +150,7 @@
   "the token (the name is in the message below) does not have the Manage permission on the pool. They must be added as a pool administrator ": "il token (il nome è nel messaggio qui sotto) non ha il permesso Manage sul pool. Va aggiunto come amministratore del pool ",
   "through the Azure run command (it appears in the Activity log). Continue?": "tramite il run-command di Azure\n        (compare nel Registro attività). Continuare?",
   "used": "usato",
+  "{0} (initially set: {1})": "{0} (impostata inizialmente: {1})",
   "{0} day {1}": "{0} giorni {1}",
   "{0} days {1}": "{0} giorni {1}",
   "{0}: the name resolves but the HTTPS connection fails.": "{0}: il nome si risolve ma la connessione HTTPS fallisce."

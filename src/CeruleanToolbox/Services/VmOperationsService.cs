@@ -116,7 +116,9 @@ public sealed class VmOperationsService
                 return (IReadOnlyList<string>)new[]
                 {
                     name, $"{ArmJson.Str(props, "publisher")}.{ArmJson.Str(props, "type")}",
-                    ArmJson.Str(props, "typeHandlerVersion"), ArmJson.Str(props, "provisioningState"),
+                    ArmJson.ExtensionVersion(ArmJson.Str(run, "typeHandlerVersion"), ArmJson.Str(props, "typeHandlerVersion")),
+                    ArmJson.Str(props, "enableAutomaticUpgrade"),
+                    ArmJson.Str(props, "provisioningState"),
                     ArmJson.Str(status, "displayStatus"),
                     // Only the headline message of a non-successful status: the sub-statuses carry the script's own output.
                     level is "Error" or "Warning" ? ExtensionMessage(ArmJson.Str(status, "message")) : "-",
@@ -128,7 +130,7 @@ public sealed class VmOperationsService
             new(T("Disks"), new[] { T("Type"), T("Name"), T("Size"), "Caching", T("Disk SKU"), T("On VM deletion"), T("Created at") }, disks),
             new(T("Network interfaces"), new[] { "NIC", T("Private IP"), T("Public IP"), "Subnet", "NSG", "Accelerated networking" },
                 nics.Select(n => (IReadOnlyList<string>)new[] { n.Name, n.PrivateIp, n.PublicIp, n.Subnet, n.Nsg, n.Accelerated }).ToList()),
-            new(T("Extensions"), new[] { T("Name"), T("Type"), T("Version"), "Provisioning", T("Execution"), T("Error detail") }, extensions),
+            new(T("Extensions"), new[] { T("Name"), T("Type"), T("Version"), T("Automatic upgrade"), "Provisioning", T("Execution"), T("Error detail") }, extensions),
         };
 
         var tags = ArmJson.Obj(root, "tags") is { ValueKind: System.Text.Json.JsonValueKind.Object } tagObject

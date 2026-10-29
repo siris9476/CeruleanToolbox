@@ -129,6 +129,20 @@ public static class ArmJson
         return value.ValueKind == JsonValueKind.Array ? value.EnumerateArray() : Enumerable.Empty<JsonElement>();
     }
 
+    // The extension resource carries the version asked for in the model (often "1.10"); the instance view carries the
+    // version actually installed on the machine ("1.10.15.0"), which is what the portal shows. When they differ, show both.
+    public static string ExtensionVersion(string running, string configured)
+    {
+        if (running == "-")
+        {
+            return configured;
+        }
+
+        return configured == "-" || string.Equals(running, configured, StringComparison.OrdinalIgnoreCase)
+            ? running
+            : T("{0} (initially set: {1})", running, configured);
+    }
+
     public static string LastSegment(string value) => value == "-" ? value : value[(value.LastIndexOf('/') + 1)..];
 
     // Azure uses 0001-01-01 for "not set": show that as "-" rather than a real-looking date.
