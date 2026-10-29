@@ -87,8 +87,44 @@ public sealed class ConnectionManagerService
         }
         catch (Exception ex)
         {
-            return new TestConnectionResult(false, ex.Message, Array.Empty<TenantSummary>(), 0);
+            return new TestConnectionResult(false, DescribeFailure(ex), Array.Empty<TenantSummary>(), 0);
         }
+    }
+
+    // Azure.Identity often keeps the real reason (the AADSTS code) in an inner exception, so
+    // the outer message alone can end right after "authentication failed:".
+    private static string DescribeFailure(Exception ex)
+    {
+        var parts = new List<string>();
+
+        void Add(Exception? e)
+        {
+            if (e is null)
+            {
+                return;
+            }
+
+            var message = e.Message?.Trim();
+            if (!string.IsNullOrEmpty(message) && !parts.Any(p => p.Contains(message)))
+            {
+                parts.Add(message);
+            }
+
+            if (e is AggregateException aggregate)
+            {
+                foreach (var inner in aggregate.InnerExceptions)
+                {
+                    Add(inner);
+                }
+            }
+            else
+            {
+                Add(e.InnerException);
+            }
+        }
+
+        Add(ex);
+        return string.Join(" ", parts);
     }
 
     public SavedConnection SaveConnection(
